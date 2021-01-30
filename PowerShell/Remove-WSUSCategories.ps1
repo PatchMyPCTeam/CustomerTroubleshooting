@@ -4,21 +4,31 @@ param(
     [parameter(Mandatory = $false)]
     [switch]$Force
 )
+
+function Get-SUSDConnectionString {
+    param(
+        [string]$SqlServer
+    )
+    $builder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new()
+    $builder['Data Source'] = $SqlServer
+    $builder['Initial Catalog'] = 'SUSDB'
+    $builder['Integrated Security'] = $true
+    return $builder.ConnectionString
+}
 function Get-WSUSTopLevelCategories {
     param(
         [parameter(Mandatory = $true)]
-        [string]$SqlInstance,
-        [parameter(Mandatory = $false)]
-        [string]$Database = 'SUSDB'
+        [System.Data.SqlClient.SqlConnection]$SqlConnection
     )
-    $getTopLevelCatSplat = @{
-        SqlInstance = $SqlInstance
-        Database    = $Database
-        CommandType = 'StoredProcedure'
-        Query       = 'spGetTopLevelCategories'
-    }
+    $command = $SqlConnection.CreateCommand()
+    $command.CommandText = 'spGetTopLevelCategories'
+    $command.CommandType = [System.Data.CommandType]::StoredProcedure
+    $adp = [System.Data.SqlClient.SqlDataAdapter]::new($command)
+    
+    $data = [System.Data.DataSet]::new()
+    $null = $adp.Fill($data)
 
-    $allTopLevelCategories = Invoke-DbaQuery @getTopLevelCatSplat
+    $allTopLevelCategories = $data.Tables[0]
 
     foreach ($Category in $allTopLevelCategories) {
         if ($Category.Title -notmatch '^Microsoft$|^Local Publisher$') {
@@ -41,20 +51,19 @@ function Get-WSUSUpdatesUnderACategory {
         [parameter(Mandatory = $false)]
         [int]$MaxResultCount = 5000,
         [parameter(Mandatory = $true)]
-        [string]$SqlInstance,
-        [parameter(Mandatory = $false)]
-        [string]$Database = 'SUSDB'
+        [System.Data.SqlClient.SqlConnection]$SqlConnection
     )
-    $getUpdatesUnderCatSplat = @{
-        SqlInstance   = $SqlInstance
-        Database      = $Database
-        Query         = 'spGetUpdatesUnderACategory'
-        As            = 'DataSet'
-        CommandType   = 'StoredProcedure'
-        SqlParameters = @{categoryID = $CategoryID; maxResultCount = $MaxResultCount }
-    }
+    $command = $SqlConnection.CreateCommand()
+    $command.CommandText = 'spGetUpdatesUnderACategory'
+    $command.CommandType = [System.Data.CommandType]::StoredProcedure
+    $null = $command.Parameters.Add([System.Data.SqlClient.SqlParameter]::new('maxResultCount', 5000))
+    $null = $command.Parameters.Add([System.Data.SqlClient.SqlParameter]::new('categoryID', $CategoryID))
+    $adp = [System.Data.SqlClient.SqlDataAdapter]::new($command)
+    
+    $data = [System.Data.DataSet]::new()
+    $null = $adp.Fill($data)
 
-    return (Invoke-DbaQuery @getUpdatesUnderCatSplat).Tables[0]
+    return $data.Tables[0]
 }
 
 function Get-WSUSSubCategoriesByUpdateID {
@@ -62,20 +71,19 @@ function Get-WSUSSubCategoriesByUpdateID {
         [parameter(Mandatory = $true)]
         [guid]$CategoryID,
         [parameter(Mandatory = $true)]
-        [string]$SqlInstance,
-        [parameter(Mandatory = $false)]
-        [string]$Database = 'SUSDB'
+        [System.Data.SqlClient.SqlConnection]$SqlConnection
     )
-    $getSubCatByIDSplat = @{
-        SqlInstance   = $SqlInstance
-        Database      = $Database
-        CommandType   = 'StoredProcedure'
-        Query         = 'spGetSubCategoriesByUpdateID'
-        SqlParameters = @{
-            categoryID = $CategoryID
-        }
-    }
-    $allSubCategories = Invoke-DbaQuery @getSubCatByIDSplat
+
+    $command = $SqlConnection.CreateCommand()
+    $command.CommandText = 'spGetSubCategoriesByUpdateID'
+    $command.CommandType = [System.Data.CommandType]::StoredProcedure
+    $null = $command.Parameters.Add([System.Data.SqlClient.SqlParameter]::new('categoryID', $CategoryID))
+    $adp = [System.Data.SqlClient.SqlDataAdapter]::new($command)
+    
+    $data = [System.Data.DataSet]::new()
+    $null = $adp.Fill($data)
+
+    $allSubCategories = $data.Tables[0]
 
     foreach ($Category in $allSubCategories) {
         [pscustomobject]@{
@@ -94,24 +102,24 @@ function Get-WSUSUpdateRevisionIDs {
         [parameter(Mandatory = $true)]
         [string]$LocalUpdateID,
         [parameter(Mandatory = $true)]
-        [string]$SqlInstance,
-        [parameter(Mandatory = $false)]
-        [string]$Database = 'SUSDB'
+        [System.Data.SqlClient.SqlConnection]$SqlConnection
     )
     $RevisionIDQuery = [string]::Format(@"
         SELECT r.RevisionID FROM dbo.tbRevision r
-           WHERE r.LocalUpdateID = {0}
-           AND (EXISTS (SELECT * FROM dbo.tbBundleDependency WHERE BundledRevisionID = r.RevisionID)
-               OR EXISTS (SELECT * FROM dbo.tbPrerequisiteDependency WHERE PrerequisiteRevisionID = r.RevisionID))
+            WHERE r.LocalUpdateID = {0}
+            AND (EXISTS (SELECT * FROM dbo.tbBundleDependency WHERE BundledRevisionID = r.RevisionID)
+            OR EXISTS (SELECT * FROM dbo.tbPrerequisiteDependency WHERE PrerequisiteRevisionID = r.RevisionID))
 "@, $LocalUpdateID)
 
-    $getUpdateRevisionIDsSplat = @{
-        SqlInstance = $SqlInstance
-        Database    = $Database
-        Query       = $RevisionIDQuery
-    }
+    $command = $SqlConnection.CreateCommand()
+    $command.CommandText = $RevisionIDQuery
+    $command.CommandType = [System.Data.CommandType]::Text
+    $adp = [System.Data.SqlClient.SqlDataAdapter]::new($command)
+    
+    $data = [System.Data.DataSet]::new()
+    $null = $adp.Fill($data)
 
-    return (Invoke-DbaQuery @getUpdateRevisionIDsSplat).RevisionID
+    return $data.Tables[0].RevisionID
 }
 
 function Invoke-WSUSDeleteUpdateByUpdateID {
@@ -123,22 +131,16 @@ function Invoke-WSUSDeleteUpdateByUpdateID {
         [parameter(Mandatory = $false)]
         [switch]$Force,
         [parameter(Mandatory = $true)]
-        [string]$SqlInstance,
-        [parameter(Mandatory = $false)]
-        [string]$Database = 'SUSDB'
+        [System.Data.SqlClient.SqlConnection]$SqlConnection
     )
     $SUSDBQueryParam = @{
-        SqlInstance = $SqlInstance
-        Database    = $Database
+        SqlConnection = $SqlConnection
     }
 
-    $deleteUpdateSplat = @{
-        Query         = 'spDeleteUpdateByUpdateID'
-        CommandType   = 'StoredProcedure'
-        SqlParameters = @{
-            updateID = $UpdateID
-        }
-    }
+    $command = $SqlConnection.CreateCommand()
+    $command.CommandText = 'spDeleteUpdateByUpdateID'
+    $command.CommandType = [System.Data.CommandType]::StoredProcedure
+    $null = $command.Parameters.Add([System.Data.SqlClient.SqlParameter]::new('updateID', $UpdateID))
 
     if ($Force) {
         $RevisionsToRemove = Get-WSUSUpdateRevisionIDs -LocalUpdateID $LocalUpdateID @SUSDBQueryParam
@@ -147,7 +149,7 @@ function Invoke-WSUSDeleteUpdateByUpdateID {
         }
     }    
 
-    return Invoke-DbaQuery @deleteUpdateSplat @SUSDBQueryParam
+    $command.ExecuteNonQuery()
 }
 
 function Invoke-WSUSDeleteRevisionByRevisionID {
@@ -155,25 +157,21 @@ function Invoke-WSUSDeleteRevisionByRevisionID {
         [parameter(Mandatory = $true)]
         [guid]$RevisionID,
         [parameter(Mandatory = $true)]
-        [string]$SqlInstance,
-        [parameter(Mandatory = $false)]
-        [string]$Database = 'SUSDB'
+        [System.Data.SqlClient.SqlConnection]$SqlConnection
     )
-    $deleteRevisionSplat = @{
-        SqlInstance   = $SqlInstance
-        Database      = $Database
-        Query         = 'spDeleteRevision'
-        CommandType   = 'StoredProcedure'
-        SqlParameters = @{
-            revisionID = $RevisionID
-        }
-    }
-
-    return Invoke-DbaQuery @deleteRevisionSplat
+    $command = $SqlConnection.CreateCommand()
+    $command.CommandText = 'spDeleteRevision'
+    $command.CommandType = [System.Data.CommandType]::StoredProcedure
+    $null = $command.Parameters.Add([System.Data.SqlClient.SqlParameter]::new('revisionID', $RevisionID))
+    $command.ExecuteNonQuery()
 }
 
+$sqlConn = [System.Data.SqlClient.SqlConnection]::new()
+$sqlConn.ConnectionString = Get-SUSDConnectionString -SqlServer $SqlServer
+$sqlConn.Open()
+
 $SUSDBQueryParam = @{
-    SqlInstance = $SqlServer
+    SqlConnection = $sqlConn
 }
 
 $TopLevelCategories = Get-WSUSTopLevelCategories @SUSDBQueryParam
