@@ -155,7 +155,7 @@ function Invoke-WSUSDeleteUpdateByUpdateID {
 function Invoke-WSUSDeleteRevisionByRevisionID {
     param(
         [parameter(Mandatory = $true)]
-        [guid]$RevisionID,
+        [int]$RevisionID,
         [parameter(Mandatory = $true)]
         [System.Data.SqlClient.SqlConnection]$SqlConnection
     )
