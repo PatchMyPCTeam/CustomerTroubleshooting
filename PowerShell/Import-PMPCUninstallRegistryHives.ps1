@@ -1,5 +1,4 @@
-function Import-PMPCUninstallRegistryHives {
-    <#
+<#
         .SYNOPSIS
             Imports the uninstall hives to the local computer from a CSV
         .DESCRIPTION
@@ -23,18 +22,17 @@ function Import-PMPCUninstallRegistryHives {
             guarantee that the following script, macro, or code can or should be used in any situation or that 
             operation of the code will be error-free.
     #>
-    param(
-        [parameter(Mandatory = $false, Position = 0)]
-        [ValidateScript( { [IO.Path]::GetExtension($_) -eq '.csv' })]
-        [string]$ImportCsvPath = '.\PMPC-Uninstall-Hive-Export.csv'
-    )
-    $UninstallHiveImport = Import-Csv -Path $ImportCsvPath
+param(
+    [parameter(Mandatory = $false, Position = 0)]
+    [ValidateScript( { [IO.Path]::GetExtension($_) -eq '.csv' })]
+    [string]$ImportCsvPath = '.\PMPC-Uninstall-Hive-Export.csv'
+)
+$UninstallHiveImport = Import-Csv -Path $ImportCsvPath
 
-    $PropertyNames = 'DisplayName', 'DisplayVersion', 'Publisher', 'InstallDate'
-    foreach ($Record in $UninstallHiveImport) {
-        $Null = New-Item -Path "registry::$($Record.RegistryPath)" -Force -ErrorAction SilentlyContinue
-        foreach ($Property in $PropertyNames) {
-            Set-ItemProperty -Path "registry::$($Record.RegistryPath)" -Name $Property -Value $Record.$Property -Force -ErrorAction SilentlyContinue -Verbose
-        }
+$PropertyNames = 'DisplayName', 'DisplayVersion', 'Publisher', 'InstallDate'
+foreach ($Record in $UninstallHiveImport) {
+    $Null = New-Item -Path "registry::$($Record.RegistryPath)" -Force -ErrorAction SilentlyContinue
+    foreach ($Property in $PropertyNames) {
+        Set-ItemProperty -Path "registry::$($Record.RegistryPath)" -Name $Property -Value $Record.$Property -Force -ErrorAction SilentlyContinue -Verbose
     }
 }
