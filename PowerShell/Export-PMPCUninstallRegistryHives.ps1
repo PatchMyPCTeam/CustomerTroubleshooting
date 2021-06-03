@@ -1,5 +1,4 @@
-function Export-PMPCUninstallRegistryHives {
-    <#
+<#
         .SYNOPSIS
             Export the uninstall hives from the local computer to a CSV
         .DESCRIPTION
@@ -23,26 +22,25 @@ function Export-PMPCUninstallRegistryHives {
             guarantee that the following script, macro, or code can or should be used in any situation or that 
             operation of the code will be error-free.
     #>
-    param(
-        [parameter(Mandatory = $false, Position = 0)]
-        [ValidatePattern('\.csv$')]
-        [string]$ExportCsvPath = '.\PMPC-Uninstall-Hive-Export.csv'
-    )
-    $PropertyNames = 'DisplayName', 'DisplayVersion', 'PSChildName', 'Publisher', 'InstallDate', @{l = 'RegistryPath'; e = { $_.PSPath -replace 'Microsoft.PowerShell.Core\\Registry::' } }
+param(
+    [parameter(Mandatory = $false, Position = 0)]
+    [ValidatePattern('\.csv$')]
+    [string]$ExportCsvPath = '.\PMPC-Uninstall-Hive-Export.csv'
+)
+$PropertyNames = 'DisplayName', 'DisplayVersion', 'PSChildName', 'Publisher', 'InstallDate', @{l = 'RegistryPath'; e = { $_.PSPath -replace 'Microsoft.PowerShell.Core\\Registry::' } }
 
-    $AllPathsToSearch = foreach ($Hive in 'HKEY_CURRENT_USER', 'HKEY_LOCAL_MACHINE') {
-        foreach ($ArchitectureRoot in 'SOFTWARE', 'SOFTWARE\WOW6432Node') {
-            [string]::Format('registry::{0}\{1}\Microsoft\Windows\CurrentVersion\Uninstall\*', $Hive, $ArchitectureRoot)
-        }
+$AllPathsToSearch = foreach ($Hive in 'HKEY_CURRENT_USER', 'HKEY_LOCAL_MACHINE') {
+    foreach ($ArchitectureRoot in 'SOFTWARE', 'SOFTWARE\WOW6432Node') {
+        [string]::Format('registry::{0}\{1}\Microsoft\Windows\CurrentVersion\Uninstall\*', $Hive, $ArchitectureRoot)
     }
-    
-    try {
-        $AllFoundObjects = (Get-ItemProperty -Path $AllPathsToSearch -Name $PropertyNames -ErrorAction SilentlyContinue).Where( { -not [string]::IsNullOrWhiteSpace($_.DisplayName) }) | Select-Object -Property $PropertyNames
-    }
-    catch {
-        Write-Error "An error occurred while gathering the properties from the registry hives. Error: $($_.Exception.Message)"
-        return 
-    }
-    
-    $AllFoundObjects | Export-Csv -Path $ExportCsvPath -Force -NoTypeInformation
 }
+    
+try {
+    $AllFoundObjects = (Get-ItemProperty -Path $AllPathsToSearch -Name $PropertyNames -ErrorAction SilentlyContinue).Where( { -not [string]::IsNullOrWhiteSpace($_.DisplayName) }) | Select-Object -Property $PropertyNames
+}
+catch {
+    Write-Error "An error occurred while gathering the properties from the registry hives. Error: $($_.Exception.Message)"
+    return 
+}
+    
+$AllFoundObjects | Export-Csv -Path $ExportCsvPath -Force -NoTypeInformation
