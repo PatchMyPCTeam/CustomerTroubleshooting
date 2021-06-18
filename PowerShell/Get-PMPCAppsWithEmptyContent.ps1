@@ -30,7 +30,8 @@ $TaskSequences = Get-CMTaskSequence | Where-Object { $_.References -ne $null }
 $allapp = Get-CMApplication -Fast
 $alPmpcApp = $allapp | Where-Object { $_.localizeddescription -match 'created by patch my pc' }
 $appSearchResult = foreach ($pmpcApp in $alPmpcApp) {
-    [xml]$appXml = (Get-CMApplication -Id $pmpcApp.modelid).sdmpackagexml
+    Write-Host "Now working on application - $($pmpcApp.LocalizedDisplayName)"
+    [xml]$appXml = (Get-CMApplication -Id $pmpcApp.CI_ID).sdmpackagexml
     $contentPath = $appXML.AppMgmtDigest.DeploymentType.Installer.Contents.Content.Location
     $appFound = Test-Path -Path "filesystem::\\$($contentPath.TrimStart('\'))"
     if (!$appFound) {
@@ -38,7 +39,7 @@ $appSearchResult = foreach ($pmpcApp in $alPmpcApp) {
         $tsRef = $TaskSequences | Where-Object { $_.references.package -eq $pmpcApp.ModelName }
         [pscustomobject]@{
             ApplicationName   = $pmpcApp.LocalizedDisplayName
-            AppModelID        = $pmpcApp.ModelID
+            AppCIID           = $pmpcApp.CI_ID
             ContentPath       = $contentPath
             ContentExists     = $appFound
             HasDeployments    = $deployments.Count -ge 1
@@ -62,8 +63,8 @@ else {
 # SIG # Begin signature block
 # MIIbzAYJKoZIhvcNAQcCoIIbvTCCG7kCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDvWTgjM/WxjLWe
-# VQTfQbB/4UypEmDNh7p70Oix/1Dx36CCFrswggT+MIID5qADAgECAhANQkrgvjqI
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBSEE9zSv58+odW
+# WtJJ8Hs3VPps7wfK3gEedDv1KXP/G6CCFrswggT+MIID5qADAgECAhANQkrgvjqI
 # /2BAIc4UAPDdMA0GCSqGSIb3DQEBCwUAMHIxCzAJBgNVBAYTAlVTMRUwEwYDVQQK
 # EwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xMTAvBgNV
 # BAMTKERpZ2lDZXJ0IFNIQTIgQXNzdXJlZCBJRCBUaW1lc3RhbXBpbmcgQ0EwHhcN
@@ -190,23 +191,23 @@ else {
 # U2lnbmluZyBDQSAoU0hBMikCEAushXLn0haurcj6SjfoprMwDQYJYIZIAWUDBAIB
 # BQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZBgkqhkiG9w0BCQMxDAYK
 # KwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAvBgkqhkiG
-# 9w0BCQQxIgQgl/GDKALRBirpavHd7lrjNAFb3edyANNUCAllfGbqAFQwDQYJKoZI
-# hvcNAQEBBQAEggEAH1MHkPYhzGkhumYwKI+QeEEmxjgsSTEwbzkjCPTfpnbb1maT
-# KJralgIgWwji+07vTKtRWAU5Jc+3PDN+ZxKqNiiKqx8f6Z6mGlyBi5qR3SUnPDo7
-# tMZYyOnTuZerTNu6kkmcDlSUxNBxtF58MFDm3uA+p0mZ5BC1pIYSJ42+GY3NnYNF
-# fBF5K5Ba89EWEmPquTdyqzghQuZhEpuKsz3KWcOWOWe22CjlFSBNGgg5Q/yuw2VA
-# dJc0k2qg4VaBq4FzUvitUikWMIcMRvuDETgrjm7yxXOKff0pCKNHhnPcmwV5/JuA
-# OxDVmoBj8NsQuyZchyOtTP2h+iMYTrLSKTipcKGCAjAwggIsBgkqhkiG9w0BCQYx
+# 9w0BCQQxIgQgBgPcbZyIWxWN+PW30MtCSX/GQnTWncn+YTAnbLme79EwDQYJKoZI
+# hvcNAQEBBQAEggEAgjndldTHPA+sZJwO0IaUnniNSpQLpBYRG7R5Q9oRBs/Rb+U6
+# OWx7m2Epq0LPBCiDO5ahixJqK4V0riQDK+ZkqWrIXSrPUiTHeeTLQwAsFZeQ9gN/
+# xT7o4lnFX/dwJmrzpMk4jx2s21efJDXF1NQMzJ9ecYHFUHh0Osqc9PH1v2J1D/p3
+# vTStqf6ujRRDr7LWVt8wvuhEkyqz0OVF+soZEhADxqepUfjcKTqYp7ow9UA7Zcid
+# yTmmz6r2vzT2DBcpOKMUX/aRO1ETECIXN/FWUiMOiOmXmIxdTgcZWx/z2uRadDEq
+# nqJ2hCXt6U/3Ud2yS0VOTR5xbab1SwwKajQmxaGCAjAwggIsBgkqhkiG9w0BCQYx
 # ggIdMIICGQIBATCBhjByMQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQg
 # SW5jMRkwFwYDVQQLExB3d3cuZGlnaWNlcnQuY29tMTEwLwYDVQQDEyhEaWdpQ2Vy
 # dCBTSEEyIEFzc3VyZWQgSUQgVGltZXN0YW1waW5nIENBAhANQkrgvjqI/2BAIc4U
 # APDdMA0GCWCGSAFlAwQCAQUAoGkwGAYJKoZIhvcNAQkDMQsGCSqGSIb3DQEHATAc
-# BgkqhkiG9w0BCQUxDxcNMjEwNjE2MTkzOTE5WjAvBgkqhkiG9w0BCQQxIgQgmFSQ
-# SViVP2jJ3dxTCfkIkpLg+4h2GyI3mS/sb094q3wwDQYJKoZIhvcNAQEBBQAEggEA
-# kCKC4ccGAqm7n5YKm6SrF51wDzhJfX2Yrthon+axvFI+C8Qn10P5oo86u8fGTjW8
-# /a0S9WvoqSiNrJ1Lqnewwvu6R+ua9LRRXk2DDABiJkbbG1EoDWRbb/roKen2XLG+
-# tyWO70BaPwDkH7KfMU7isAKkljBmSquHGVjZRXrVAr2aDniQPcOeZLVAY35Snvq6
-# 95KZ03irOl78EFleZWJL98HlNgLn7Bwc3G9b+fCNGTQ+VcyXaSc7qQl3SqgGPBD5
-# 0dlIZSQkiT7Hp1/qID+eqVxPfUiC6cWlhSjcp4qzXOphJZcvW4DVqpadaDaA3D1a
-# khoFY8zwVwp4zTlpFtJ4ng==
+# BgkqhkiG9w0BCQUxDxcNMjEwNjE4MTgzMTA5WjAvBgkqhkiG9w0BCQQxIgQgTrP/
+# TgXhE6ztsrcgZTJ+nL0wdEX5ifJH+SyU5wAIwskwDQYJKoZIhvcNAQEBBQAEggEA
+# UY+wKuj+pWOzEGFeRYrBy6CCfxhBgqg4fMmfuyI8OgFQLBRON114hXxHM3QOHJCh
+# LO0GzCeV7P9mI+x80/3adWIoyqtgfK6OX6ZAOob0ja6UqF9PHhBL0fJ0RlCy7vBI
+# kpj8oqB2sV6pgmbo+u1HuNr6LUUIkLN841/y3gwcSpvSolg+s3IN07gY8ubQfnnT
+# DyANEWlAX0GV/1WNQnpgnzD2UuM/LFguWOD8WEdHZN29La9L44XIw6mV5E70EjSY
+# Svq+ysiTIaTvCjvrLYFrHGaPwmLKN7RG1lm7icduaksohcIiExVfiy62qn5t7YwS
+# iL4R6SY+ZRDoDuLrO/2DBw==
 # SIG # End signature block
