@@ -30,7 +30,8 @@ $TaskSequences = Get-CMTaskSequence | Where-Object { $_.References -ne $null }
 $allapp = Get-CMApplication -Fast
 $alPmpcApp = $allapp | Where-Object { $_.localizeddescription -match 'created by patch my pc' }
 $appSearchResult = foreach ($pmpcApp in $alPmpcApp) {
-    [xml]$appXml = (Get-CMApplication -Id $pmpcApp.modelid).sdmpackagexml
+    Write-Host "Now working on application - $($pmpcApp.LocalizedDisplayName)"
+    [xml]$appXml = (Get-CMApplication -Id $pmpcApp.CI_ID).sdmpackagexml
     $contentPath = $appXML.AppMgmtDigest.DeploymentType.Installer.Contents.Content.Location
     $appFound = Test-Path -Path "filesystem::\\$($contentPath.TrimStart('\'))"
     if (!$appFound) {
@@ -38,7 +39,7 @@ $appSearchResult = foreach ($pmpcApp in $alPmpcApp) {
         $tsRef = $TaskSequences | Where-Object { $_.references.package -eq $pmpcApp.ModelName }
         [pscustomobject]@{
             ApplicationName   = $pmpcApp.LocalizedDisplayName
-            AppModelID        = $pmpcApp.ModelID
+            AppCIID           = $pmpcApp.CI_ID
             ContentPath       = $contentPath
             ContentExists     = $appFound
             HasDeployments    = $deployments.Count -ge 1
