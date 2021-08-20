@@ -27,7 +27,7 @@ param(
     [ValidatePattern('\.csv$')]
     [string]$ExportCsvPath = '.\PMPC-Uninstall-Hive-Export.csv'
 )
-$PropertyNames = 'DisplayName', 'DisplayVersion', 'PSChildName', 'Publisher', 'InstallDate', @{l = 'RegistryPath'; e = { $_.PSPath -replace 'Microsoft.PowerShell.Core\\Registry::' } }
+$PropertyNames = 'DisplayName', 'DisplayVersion', 'PSChildName', 'Publisher', 'InstallDate', 'UninstallString', 'QuietUninstallString', 'SystemComponent', @{l = 'RegistryPath'; e = { $_.PSPath -replace 'Microsoft.PowerShell.Core\\Registry::' } }
 
 $AllPathsToSearch = foreach ($Hive in 'HKEY_CURRENT_USER', 'HKEY_LOCAL_MACHINE') {
     foreach ($ArchitectureRoot in 'SOFTWARE', 'SOFTWARE\WOW6432Node') {
