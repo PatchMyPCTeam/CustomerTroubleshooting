@@ -14,6 +14,13 @@
 .NOTES
     This script makes modifications to the registry. Modifying REGISTRY settings incorrectly can cause serious problems that may prevent your computer from booting properly. 
     Patch My PC cannot guarantee that any problems resulting from the configuring of REGISTRY settings can be solved. Modifications of these settings are at your own risk.
+    
+    ################# DISCLAIMER #################
+    Patch My PC provides scripts, macro, and other code examples for illustration only, without warranty 
+    either expressed or implied, including but not limited to the implied warranties of merchantability 
+    and/or fitness for a particular purpose. This script is provided 'AS IS' and Patch My PC does not 
+    guarantee that the following script, macro, or code can or should be used in any situation or that 
+    operation of the code will be error-free.
 #>
 [CmdletBinding()]
 param (
