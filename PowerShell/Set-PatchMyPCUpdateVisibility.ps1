@@ -162,7 +162,7 @@ process {
         $Updates = (Get-WSUSUpdatesUnderACategory -CategoryID $Category.UpdateId @SUSDBQueryParam).UpdateId.Guid
         $UpdateCount = $Updates | Measure-Object | Select-Object -ExpandProperty Count
         Write-Host -ForegroundColor Magenta "Setting [IsLocallyPublished] = $Visibility for up to $UpdateCount update$(if($UpdateCount -ne 1){'s'})"
-        if($PSCmdlet.ShouldProcess("$UpdateCount update$(if($UpdateCount -ne 1){'s'})", 'Set-WsusUpdateVisibility')){
+        if ($PSCmdlet.ShouldProcess("$UpdateCount update$(if($UpdateCount -ne 1){'s'})", 'Set-WsusUpdateVisibility')) {
             $UpdatesChangedCount = Set-WsusUpdateVisibility -UpdateIds $Updates -IsLocallyPublished $Visibility @SUSDBQueryParam
             Write-Host -ForegroundColor Magenta "$UpdatesChangedCount Update record$(if($UpdatesChangedCount -ne 1){'s'}) $(if($UpdatesChangedCount -ne 1){'have'}else{'has'}) been set to IsLocallyPublished = $Visibility"
         }
