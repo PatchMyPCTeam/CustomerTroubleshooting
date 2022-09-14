@@ -4,15 +4,12 @@
 .DESCRIPTION
     This script is useful when you have a standalone WSUS environment (not connected to ConfigMgr)
     and you want to see the Patch My PC updates in the WSUS console. By default, they do not show up.
-
     This is also useful for downstream WSUS servers, as the IsLocallyPublished defaults to 1 when updates
     sync to a downstream server, even if it is set to 0 on the upstream.
-
     This script assumes you have permissions to edit the database. Namely the IsLocallyPublished column
     in the tbUpdate table.
 .PARAMETER ShowInWSUS
     A boolean that sets whether Patch My PC updates should show in WSUS or not. [$true = Show] [$false = Hide]
-
     Defaults to $true
 .EXAMPLE
     C:\PS> Set-PatchMyPCUpdateVisibility
@@ -61,7 +58,7 @@ _____________________________________________________
             [string]$SqlServer,
             [string]$Database
         )
-        $builder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new()
+        $builder = New-Object -TypeName System.Data.SqlClient.SqlConnectionStringBuilder
         $builder['Data Source'] = $SqlServer
         $builder['Initial Catalog'] = $Database
         $builder['Integrated Security'] = $true
@@ -71,7 +68,7 @@ _____________________________________________________
         param(
             [string]$ConnectionString
         )
-        $sqlConn = [System.Data.SqlClient.SqlConnection]::new()
+        $sqlConn = New-Object -TypeName System.Data.SqlClient.SqlConnection
         $sqlConn.ConnectionString = $ConnectionString
         $sqlConn.Open()
     
@@ -86,9 +83,9 @@ _____________________________________________________
         $command = $SqlConnection.CreateCommand()
         $command.CommandText = 'spGetTopLevelCategories'
         $command.CommandType = [System.Data.CommandType]::StoredProcedure
-        $adp = [System.Data.SqlClient.SqlDataAdapter]::new($command)
+        $adp = New-Object -TypeName System.Data.SqlClient.SqlDataAdapter -ArgumentList $command
     
-        $data = [System.Data.DataSet]::new()
+        $data = New-Object -TypeName System.Data.DataSet
         $null = $adp.Fill($data)
     
         $allTopLevelCategories = $data.Tables[0]
@@ -118,11 +115,11 @@ _____________________________________________________
         $command = $SqlConnection.CreateCommand()
         $command.CommandText = 'spGetUpdatesUnderACategory'
         $command.CommandType = [System.Data.CommandType]::StoredProcedure
-        $null = $command.Parameters.Add([System.Data.SqlClient.SqlParameter]::new('maxResultCount', 5000))
-        $null = $command.Parameters.Add([System.Data.SqlClient.SqlParameter]::new('categoryID', $CategoryID))
-        $adp = [System.Data.SqlClient.SqlDataAdapter]::new($command)
+        $null = $command.Parameters.Add($(New-Object -TypeName System.Data.SqlClient.SqlParameter -ArgumentList 'maxResultCount', 5000))
+        $null = $command.Parameters.Add($(New-Object -TypeName System.Data.SqlClient.SqlParameter -ArgumentList 'categoryID', $CategoryID))
+        $adp = New-Object -TypeName System.Data.SqlClient.SqlDataAdapter -ArgumentList $command
     
-        $data = [System.Data.DataSet]::new()
+        $data = New-Object -TypeName System.Data.DataSet
         $null = $adp.Fill($data)
     
         return $data.Tables[0]
@@ -143,13 +140,13 @@ _____________________________________________________
     }
 }
 process {
-    $WSUSSQL = Get-ItemPropertyValue -Path 'registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Update Services\Server\Setup\' -Name SqlServerName
+    $WSUSSQL = (Get-ItemProperty -Path 'registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Update Services\Server\Setup\').SqlServerName
     if ($WSUSSQL -match 'WID$') {
         # If the SqlServerName ends with WID then we know this to be a WID database and adjust the variable as needed
         $WSUSSQL = 'np:\\.\pipe\MICROSOFT##WID\tsql\query'
     }
     Write-Host -ForegroundColor Magenta "SqlServerName is $WSUSSQL"
-    $WSUSDB = Get-ItemPropertyValue -Path 'registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Update Services\Server\Setup\' -Name SqlDatabaseName
+    $WSUSDB = (Get-ItemProperty -Path 'registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Update Services\Server\Setup\').SqlDatabaseName
     Write-Host -ForegroundColor Magenta "SqlDatabaseName is $WSUSDB"
     $sqlConn = Get-SUSDBConnection -ConnectionString (Get-SUSDBConnectionString -SqlServer $WSUSSQL -Database $WSUSDB)
     $SUSDBQueryParam = @{
