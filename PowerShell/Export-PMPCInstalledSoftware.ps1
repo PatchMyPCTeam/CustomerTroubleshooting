@@ -47,7 +47,7 @@ $AllPathsToSearch = foreach ($Hive in 'HKEY_CURRENT_USER', 'HKEY_LOCAL_MACHINE')
 }
     
 try {
-    $AllFoundObjects = Get-ItemProperty -Path $AllPathsToSearch -Name $PropertyNames -ErrorAction 'Stop' | 
+    $AllFoundObjects = Get-ItemProperty -Path $AllPathsToSearch -ErrorAction 'Stop' | 
         Where-Object { -not [String]::IsNullOrWhiteSpace($_.DisplayName) } | 
         Select-Object -Property $PropertyNames
 }
