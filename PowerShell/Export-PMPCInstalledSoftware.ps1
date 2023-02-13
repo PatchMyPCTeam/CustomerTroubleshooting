@@ -1,25 +1,25 @@
 <#
-    .SYNOPSIS
-        Get installed software from the local computer's registry and export to .csv
-    .DESCRIPTION
-        Get installed software from the local computer's registry and export to .csv
-    .PARAMETER ExportCsvPath
-        Specifies the desired path to the CSV to export. This defaults to the current directory with a file name of 'PMPC-Uninstall-Hive-Export.csv'
-    .EXAMPLE
-        Export-PMPCUninstallRegistryHives -ExportCsvPath 'C:\temp\PMPC-Export.csv'
+.SYNOPSIS
+    Get installed software from the local computer's registry and export to .csv
+.DESCRIPTION
+    Get installed software from the local computer's registry and export to .csv
+.PARAMETER ExportCsvPath
+    Specifies the desired path to the CSV to export. This defaults to the current directory with a file name of 'PMPC-Uninstall-Hive-Export.csv'
+.EXAMPLE
+    Export-PMPCUninstallRegistryHives -ExportCsvPath 'C:\temp\PMPC-Export.csv'
 
-        Exports all the uninstall hives to a CSV file named 'C:\temp\PMPC-Export.csv'
-    .EXAMPLE
-        Export-PMPCUninstallRegistryHives
+    Exports all the uninstall hives to a CSV file named 'C:\temp\PMPC-Export.csv'
+.EXAMPLE
+    Export-PMPCUninstallRegistryHives
 
-        Exports all the uninstall hives to a CSV file named 'PMPC-Uninstall-Hive-Export.csv' in the directory where the function was ran
-    .NOTES
-        ################# DISCLAIMER #################
-        Patch My PC provides scripts, macro, and other code examples for illustration only, without warranty 
-        either expressed or implied, including but not limited to the implied warranties of merchantability 
-        and/or fitness for a particular purpose. This script is provided 'AS IS' and Patch My PC does not 
-        guarantee that the following script, macro, or code can or should be used in any situation or that 
-        operation of the code will be error-free.
+    Exports all the uninstall hives to a CSV file named 'PMPC-Uninstall-Hive-Export.csv' in the directory where the function was ran
+.NOTES
+    ################# DISCLAIMER #################
+    Patch My PC provides scripts, macro, and other code examples for illustration only, without warranty 
+    either expressed or implied, including but not limited to the implied warranties of merchantability 
+    and/or fitness for a particular purpose. This script is provided 'AS IS' and Patch My PC does not 
+    guarantee that the following script, macro, or code can or should be used in any situation or that 
+    operation of the code will be error-free.
 #>
 param(
     [Parameter()]
