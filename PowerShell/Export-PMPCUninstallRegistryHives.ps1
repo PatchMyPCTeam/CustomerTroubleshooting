@@ -1,0 +1,1 @@
+# This file has been renamed to https://github.com/PatchMyPCTeam/CustomerTroubleshooting/blob/Release/PowerShell/Export-PMPCInstalledSoftware.ps1
