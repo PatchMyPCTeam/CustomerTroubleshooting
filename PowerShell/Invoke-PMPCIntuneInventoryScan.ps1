@@ -109,7 +109,10 @@ $DetectedAppsAggregate = Import-Csv $CsvFile
 
 Remove-Item $TempFile,$CsvFile -ErrorAction 'SilentlyContinue'
 
+$i = 0
 $AppCountList = foreach ($SupportedProduct in $SupportedProducts) {
+    -parallel {
+    Write-Progress -activity "Processing PMPC Apps. . ." -status "Processing $($SupportedProduct.Product) - Scanned: $i of $($SupportedProducts.Count)" -percentComplete (($i / $SupportedProducts.Count)  * 100)
     $IntuneApp = $DetectedAppsAggregate.Where{ 
         $_.ApplicationName -like $SupportedProduct.SQLSearchInclude -and 
         $_.ApplicationName -notlike $SupportedProduct.SQLSearchExclude -and 
@@ -123,6 +126,8 @@ $AppCountList = foreach ($SupportedProduct in $SupportedProducts) {
             DeviceCount     = [int]($IntuneApp | Measure-Object -Property 'DeviceCount' -Sum | Select-Object -ExpandProperty 'Sum')
         }
     }
+    $i++
+}
 }
 
 $AppCountList | Sort-Object -Property Vendor, Product | Export-Csv -NoTypeInformation -Path .\PatchMyPCAppsFoundinIntune.csv
@@ -131,8 +136,8 @@ $AppCountList | out-gridview
 # SIG # Begin signature block
 # MIIljAYJKoZIhvcNAQcCoIIlfTCCJXkCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBJQ3p68H2ufoBC
-# XJCku+JqWK30kvMDe8GEU67sXF4hkqCCH4swggWNMIIEdaADAgECAhAOmxiO+dAt
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCORgEnuXCL44XG
+# Ew+/0DacGnK2hYnX4GdKiKe22YFhVKCCH4swggWNMIIEdaADAgECAhAOmxiO+dAt
 # 5+/bUOIIQBhaMA0GCSqGSIb3DQEBDAUAMGUxCzAJBgNVBAYTAlVTMRUwEwYDVQQK
 # EwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xJDAiBgNV
 # BAMTG0RpZ2lDZXJ0IEFzc3VyZWQgSUQgUm9vdCBDQTAeFw0yMjA4MDEwMDAwMDBa
@@ -306,28 +311,28 @@ $AppCountList | out-gridview
 # U2lnbmluZyBDQSAoU0hBMikCEApHfTxoon07kw0cOj1ukTgwDQYJYIZIAWUDBAIB
 # BQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAAoQKAADAZBgkqhkiG9w0BCQMxDAYK
 # KwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAvBgkqhkiG
-# 9w0BCQQxIgQghFYtiHsDx/eHm5iJ4e6phZSW11QUWrT+fhyxP2UlDAIwDQYJKoZI
-# hvcNAQEBBQAEggEAiH5AKspr5zZHricbRhvRyGpBCqFrQo8P9ZyeAY++QdnQ5M9w
-# 7rpzEd0IRUYC/lpJwhhMhaIMJrFdACV5SeT9swzwdzrYCp0oRUfJdHw6fxpc5BnE
-# aIKe+Kr7/IuIjGISF6FdjIL5l5MC3LOFato/3+YcT2GLeTh4JBGKV235q8QuwHY6
-# 3Msy/ahwdht2YRvtmKY+eFAaJYCq71mpFi8PKTSEJiAQGdUKnP4zPu4vVqgfHvog
-# EhKNKPj/ejkCM6SBdo3ebI5Np7fWk6VNkKnG9hZpcB7OjcRYQ+mgNw1iY8XiHCgk
-# rFquJcvMWSOe7hl24TwSmSuPmS/SwO/sluKQwaGCAyAwggMcBgkqhkiG9w0BCQYx
+# 9w0BCQQxIgQgfQSlhEiQ/KgmVf+FsnErGkFh8NkwlYNs7YHqi5j99SMwDQYJKoZI
+# hvcNAQEBBQAEggEAi5cFCREg/c0diS3sGCjpk1cIKZX/Ct59fGluc4kVFcsfPrXx
+# /TPPTw6bOwwbKFVKlhuhnJ/iqiWwYDT2tjZsGMaVbXaAO7/zdXgI7QO7LhM2dzkC
+# k4scNt+brfEFrO0C78C5OocLw0Iy71Mx4NglOgQUf/IMHvnkFTUKCvkwlPxsTCtJ
+# Vr1DfvPXuzIs4LEjuCYQ4Vp+E5HyWOSNhWKg8ARajzQ448UkvtUq69RYEJ2zVQOS
+# 3E35/l6CcQs9k+qwh8+C8atFuCVaz16+CsUA7epiCgZlYRvEOchtJFMoVlFeTD/G
+# n1zoR+EVUlV78Slhq4eNxN1JLR5c+26/4JLmbKGCAyAwggMcBgkqhkiG9w0BCQYx
 # ggMNMIIDCQIBATB3MGMxCzAJBgNVBAYTAlVTMRcwFQYDVQQKEw5EaWdpQ2VydCwg
 # SW5jLjE7MDkGA1UEAxMyRGlnaUNlcnQgVHJ1c3RlZCBHNCBSU0E0MDk2IFNIQTI1
 # NiBUaW1lU3RhbXBpbmcgQ0ECEAxNaXJLlPo8Kko9KQeAPVowDQYJYIZIAWUDBAIB
 # BQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcNAQcBMBwGCSqGSIb3DQEJBTEPFw0y
-# MzAzMDgyMDE0MDRaMC8GCSqGSIb3DQEJBDEiBCCg9N4o8kSZAgZ21dk4Hci9yA3I
-# UFIWAzPly/8TE/a76TANBgkqhkiG9w0BAQEFAASCAgDIMedVdQs7llktVWHp+gnT
-# dSLXY7Z8DEGUUrrJlkMekDCgOaVnaXx2X+AfX6I5kR2LzbJTN6mqSSDPo2bvDkP1
-# 3PosIuPBzF6oBcm3c3iI1aUwDNtifTovGGJRTxnpmTtEBS0AEvTFBf/u8L0vxRPb
-# oY70F9hUk5vUQRdnCakQJXI9iboeVRVt9biqVKwUl7a7n8RopGijvGUC2dxLp65O
-# +5eMk3q7za8papzk+90lM9WOJekBl0VYfEUoBzo+pPglQxaymSgXrsEwzPfRFud4
-# PqOANgO1bomrNu6yTXeZH1x+FyO6xvrGffOmAqQlXbHVVG8TzDVqI8PxSq3P/nDo
-# MfJV+I7B7Tv7xbLEJcsEtBw+B1XPVsF2es5secJkqa2iEWxlH51oH7im1rpIfkYo
-# h80uhRpdD2853pCFAR2X4Y4avM1oss6r/50avlkhTL9O6SUQEbW3mYXSm7WxWawd
-# w30fp3r2omMRlk5gPZgi1eKoe26ksp0K6nTYR817IkgIKmuGuaEkBdNNljPMAXbZ
-# 18/ViPYUN5M5WD7Tr1H/F0s5n40gICRJQSROEJWeVCFrhQgwLi2KsgaI0n4BhtgA
-# MiZC4vESBd77sy0UZKELI64gr6uPgEMsc/VksZN3B1D7OAUpjvRjB7+Z4/bJdn0B
-# GNtwYwD7wNR/QB2dhZmodA==
+# MzAzMTQxNzEyNDNaMC8GCSqGSIb3DQEJBDEiBCDi9iQb3jUAy9CAe2WBY9agLUhW
+# CjBkof3wMP/b9z+GzzANBgkqhkiG9w0BAQEFAASCAgAjGuhWgNppYkN+4LY8DKU2
+# MmygVxwsanJ9z3AZUw63g/ksPAr1QBp57LSQ0LNh1d/Bni/ocndA5TRdKFJeYIfJ
+# 1zakEv3s/ic98cYwSLgQsTt6DWDwChj3eHQNkFRSQAH5nPzGMxxh4h1K02WXUcXm
+# 0/hbf/8rCnf4bQsM+CBSkHxcfB4Vf/h2D1JPtpIyUFRAsfKW1EVtnCocpjqRj3RB
+# UIhi3x4Yk+Cn5eqKtUc08NxwiS9bW8Eh30YgKOkP7q1lrrpS5ud+jphwevjj++yS
+# gslbQx/gQh/X0Y9bNwZYH5quqpsdTCHvBYyjdKrju/7jxO4trGX9JKA9s0d4rN7j
+# TBm5HvhIvULxGQZ8TYT5YobGxYxTh3k5eRD7K+He0sD+zzB8VrHGLFec4ntbzG0L
+# um0+Xaja+xq9H5u4Rp+1FD/VIdSqTJMo3C3eSJkHJZabojHEoeG6pxX/mmjN/ZUM
+# TrYcpJ08d0ZuyKmAdvcoHstfL2YZpcEFkCHtlmpddutjc4S4hh+SUS9pKryFCTn5
+# LBf/D79xhZnx+N2jxesz90jv+DyhVINjnav2fmH1Bn7dTGx7Re9Qx86c5UkLAagc
+# +fn4ixZOj1SaTBtUA/rvb6F+BoaUcK9xgZI9qE21ImYLOMLtgty7TMPt+kp0b4dl
+# cKtui73xidpAS3AhUx9bcA==
 # SIG # End signature block
