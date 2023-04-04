@@ -1,3 +1,5 @@
+#Requires -Modules MSAL.ps
+
 <#
 .SYNOPSIS
     Clean Duplicate Intune Apps and Updates that may have been created due to an issue on March 16, 2023
