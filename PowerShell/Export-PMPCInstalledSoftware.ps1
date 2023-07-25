@@ -55,7 +55,10 @@ catch {
     Write-Verbose "An error occurred while gathering the properties from the registry hives. Error: $($_.Exception.Message)" -Verbose
     throw
 }
-    
+
+# Add device name to the CSV path
+$ExportCsvPath = ".\$ENV:ComputerName-$($ExportCsvPath -replace '^\.\\')"
+
 $AllFoundObjects | Export-Csv -Path $ExportCsvPath -Force -NoTypeInformation -ErrorAction 'Stop'
 
 # SIG # Begin signature block
