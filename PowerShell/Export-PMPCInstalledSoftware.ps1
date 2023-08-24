@@ -6,11 +6,11 @@
 .PARAMETER ExportCsvPath
     Specifies the desired path to the CSV to export. This defaults to the current directory with a file name of 'PMPC-Uninstall-Hive-Export.csv'
 .EXAMPLE
-    Export-PMPCUninstallRegistryHives -ExportCsvPath 'C:\temp\PMPC-Export.csv'
+    Export-PMPCInstalledSoftware -ExportCsvPath 'C:\temp\PMPC-Export.csv'
 
     Exports all the uninstall hives to a CSV file named 'C:\temp\PMPC-Export.csv'
 .EXAMPLE
-    Export-PMPCUninstallRegistryHives
+    Export-PMPCInstalledSoftware
 
     Exports all the uninstall hives to a CSV file named 'PMPC-Uninstall-Hive-Export.csv' in the directory where the function was ran
 .NOTES
