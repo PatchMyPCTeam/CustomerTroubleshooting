@@ -62,5 +62,5 @@ $ExportCsvPath = ".\$ENV:ComputerName-$($ExportCsvPath -replace '^\.\\')"
 $AllFoundObjects | Export-Csv -Path $ExportCsvPath -Force -NoTypeInformation -ErrorAction 'Stop'
 
 if (Test-Path $ExportCsvPath) {
-    Write-Verbose ('Successfully created "{0}" on host "{1}", please share this .csv with Patch My PC support' -f $ExportCsvPath, $env:ComputerName)
+    Write-Verbose ('Successfully created "{0}" on host "{1}", please share this .csv with Patch My PC support' -f $ExportCsvPath, $env:ComputerName) -Verbose
 }
