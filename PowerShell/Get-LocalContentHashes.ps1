@@ -29,7 +29,7 @@ Function Get-EncodedHash {
         }, Path
         ).HashBase64
     )
-    return $encodedHash
+    Return $encodedHash
 
 }
 
@@ -38,15 +38,15 @@ $settingsFile = Get-Item -Path $settingsReg
 $settingsXml = [xml](Get-Content -Path (Join-Path -Path $settingsFile.FullName -ChildPath Settings.xml))
 $localContentRepo = $settingsXml.'PatchMyPC-Settings'.LocalContentRepository
 
-try {
-    Test-Path -Path $localContentRepo -ErrorAction Stop
+Try {
+    Test-Path -Path $localContentRepo -ErrorAction Stop | Out-Null
 }
-catch {
+Catch {
     Write-Warning -Message "Could not find the Local Content Repository path in the Patch My PC Publishing Service registry key"
     Exit
 }
-
-$files = Get-ChildItem -Path $localContentRepo -Recurse -File
+$resultArray = @()
+$files = Get-ChildItem -Path $localContentRepo -Recurse -File | Where-Object { $_ -like "*msi" -or $_ -like "*.exe" } -ErrorAction SilentlyContinue
 Foreach ($file in $files) {
     $fileHash = Get-FileHash $file.FullName -Algorithm SHA1
     $encodedhash = Get-EncodedHash $fileHash
@@ -55,5 +55,7 @@ Foreach ($file in $files) {
         Hash = $encodedhash
     }
     $result
-    $result | Export-Csv -Path $localContentRepo\LocalContentHashes.csv -Append -NoTypeInformation
+    $resultArray += $result
 }
+
+$resultArray | Export-Csv -Path $localContentRepo\LocalContentHashes.csv -NoTypeInformation
