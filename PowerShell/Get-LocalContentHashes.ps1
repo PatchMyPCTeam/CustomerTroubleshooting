@@ -1,9 +1,18 @@
 <#
 .SYNOPSIS
-    Script to list all the files in the Patch My PC Local Content Repository. 
-    The list is exported as a LocalContentHashes.csv in the Local Content Repository folder
+    Script to list all the files in the Patch My PC Local Content Repository.
+    Files found in the Local Content Repository are compared to the Patch My PC catalog to see if they have the expected hash.
+    The list is exported as a LocalContentHashes.csv in the Local Content Repository folder or the working directory if the Local Content Repository folder is not accessible.
 
 .NOTES
+
+    Author Ben Whitmore@PatchMyPC
+    Date: 2021-09-15
+    Version: 1.0
+
+    ################# IMPORTANT #################
+    This script must be run on the Patch My PC Publishing Service server
+
     ################# DISCLAIMER #################
     Patch My PC provides scripts, macro, and other code examples for illustration only, without warranty 
     either expressed or implied, including but not limited to the implied warranties of merchantability 
@@ -11,21 +20,124 @@
     guarantee that the following script, macro, or code can or should be used in any situation or that 
     operation of the code will be error-free.
 #>
+
 $pmpreg = 'SOFTWARE\Patch My PC Publishing Service'
 $VerbosePreference = 'Continue'
 
+Function Get-MsiInfo {
+    Param (
+        [Parameter(Mandatory = $true)]
+        [String]$File,
+        
+        [Parameter(Mandatory = $true)]
+        [String]$Property
+    )
+
+    # Use the WindowsInstaller.Installer COM object to query the MSI file
+    $installer = New-Object -ComObject WindowsInstaller.Installer
+    $database = $installer.GetType().InvokeMember("OpenDatabase", "InvokeMethod", $Null, $installer, @($File, 0))
+
+    Try {
+        $query = "SELECT `Value` FROM `Property` WHERE `Property` = '$Property'"
+        $view = $database.GetType().InvokeMember("OpenView", "InvokeMethod", $Null, $database, ($query))
+        $view.GetType().InvokeMember("Execute", "InvokeMethod", $Null, $view, $Null)
+        $record = $view.GetType().InvokeMember("Fetch", "InvokeMethod", $Null, $view, $Null)
+
+        If ($record) {
+            $msiProperty = $record.GetType().InvokeMember("StringData", "GetProperty", $Null, $record, 1)
+
+            Return $msiProperty
+        }
+    }
+    Catch {
+        Write-Warning  ("Failed to get MSI property '{0}' from '{1}'" -f $Property, $File)
+    }
+    Finally {
+        $view.GetType().InvokeMember("Close", "InvokeMethod", $Null, $view, $Null) | Out-Null
+        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($view) | Out-Null
+        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($database) | Out-Null
+        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($installer) | Out-Null
+    }
+}
 Function Get-EncodedHash {
     [CmdletBinding()]
     Param(
         [Parameter(Position = 0)]
-        [System.Object]$hashValue
+        [System.Object]$HashValue
     )
 
     $hashBytes = $hashValue.Hash -split '(?<=\G..)(?=.)' | ForEach-Object { [byte]::Parse($_, 'HexNumber') }
     Return [Convert]::ToBase64String($hashBytes)
 }
 
-# Get Patch My PC Local Content Repository path from registry
+Function Get-CatalogXml {
+    [CmdletBinding()]
+    Param(
+        [Parameter(Position = 0)]
+        [String]$CatalogPath
+    ) 
+
+    # Read the Patch My PC catalog from disk
+    $namespace = @{
+        "smc" = "http://schemas.microsoft.com/sms/2005/04/CorporatePublishing/SystemsManagementCatalog.xsd"
+        "sdp" = "http://schemas.microsoft.com/wsus/2005/04/CorporatePublishing/SoftwareDistributionPackage.xsd"
+    }
+
+    $xml = Select-Xml -Path $CatalogPath -Namespace $namespace -XPath "//smc:SoftwareDistributionPackage" 
+
+    Return $xml
+
+    # Clean-up
+    $xml = $Null
+    [System.GC]::Collect()
+}
+
+Function Get-CatalogHash {
+    [CmdletBinding()]
+    Param(
+        [Parameter(Position = 0)]
+        [Object]$Catalog,
+        [Parameter(Position = 1)]
+        [Object]$EncodedHashes
+    )
+
+    # Check to see if the hash exists in the Patch My PC catalog
+    $resultCatArray = @()
+    $processedHashes = @{}
+
+    ForEach ($node in $Catalog.Node) {
+        
+        ForEach ($hash in $EncodedHashes) { 
+            
+            If ($node.InstallableItem.OriginFile.Digest -eq $hash -and -not $processedHashes.ContainsKey($hash)) {
+
+                # Return the result if a matching digest is found in the catalog
+                $catMatchResult = [PSCustomObject]@{
+                    CatTitle    = $node.LocalizedProperties.Title
+                    CatFileName = $node.InstallableItem.OriginFile.FileName
+                    CatFileHash = $node.InstallableItem.OriginFile.Digest
+                    CatBulletin = $node.UpdateSpecificData.SecurityBulletinID
+                }
+                $resultCatArray += $catMatchResult
+
+                # Add the hash to the processed hashes table
+                $processedHashes[$hash] = $true
+            }
+        }
+        
+        # Reset the processed hashes table
+        $processedHashes = @{}
+    }
+
+    Return $resultCatArray
+}
+
+################# MAIN #################
+
+
+################# 1: Get Patch My PC Environment #################
+
+# Check if Patch My PC Publishing Service is installed
 $settingsReg = (Get-ItemProperty -Path "HKLM:\$pmpreg" -Name 'Path').Path
 $settingsFile = Get-Item -Path $settingsReg
 $settingsXml = [xml](Get-Content -Path (Join-Path -Path $settingsFile.FullName -ChildPath 'Settings.xml')) 
@@ -40,36 +152,26 @@ Catch {
     Exit
 }
 
+################# 2: Get installer files from Local Content Repository #################
+
 # Get all .exe and .msi files in the Local Content Repository
 $resultArray = @()
 $files = Get-ChildItem -Path $localContentRepo -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "*msi" -or $_.Name -like "*exe" }
-Write-Verbose -Message ("Found {0} files in the Local Content Repository. Getting file information, please wait..." -f $($files.Count))
+Write-Verbose -Message ("There {0} '{1}' file{2} in the Local Content Repository. Getting file information, please wait..." -f $(If (($files | Measure-Object).Count -eq 1) { "is" } Else { "are" }), ($files | Measure-Object).Count, $(If (($files | Measure-Object).Count -ne 1) { "s" } Else { $Null }))
 
 Foreach ($file in $files) {
-
     $msiVersion = $Null
 
     # Attempt to get MSI Version information from MSI database
     If ($file.FullName.EndsWith(".msi")) {
         
-        Try {
-            $installer = New-Object -ComObject WindowsInstaller.Installer
-            $database = $installer.GetType().InvokeMember("OpenDatabase", "InvokeMethod", $Null, $installer, @($file.FullName, 0))
-            $query = "SELECT `Value` FROM `Property` WHERE `Property` = 'ProductVersion'"
-            $view = $database.GetType().InvokeMember("OpenView", "InvokeMethod", $Null, $database, ($query))
-            $view.GetType().InvokeMember("Execute", "InvokeMethod", $Null, $view, $Null)
-            $record = $view.GetType().InvokeMember("Fetch", "InvokeMethod", $Null, $view, $Null)
-            $msiVersion = $record.GetType().InvokeMember("StringData", "GetProperty", $Null, $record, 1)
-            $view.GetType().InvokeMember("Close", "InvokeMethod", $Null, $view, $Null)
-        }
-        Catch {
-            Write-Warning ("Failed to get MSI file version for ""$($file.FullName)"". {0}" -f $_)
-        }
+        $msiVersion = Get-MsiInfo -File $file.FullName -Property 'ProductVersion' | Out-String
+        $msiVersion = $msiVersion.TrimEnd()
     }
 
     # Get SHA1 hash of file and encode it to Base64
     $fileHash = Get-FileHash $file.FullName -Algorithm SHA1
-    $encodedhash = Get-EncodedHash $fileHash
+    $encodedhash = Get-EncodedHash -HashValue $fileHash
     
     # Build result object
     $result = [PSCustomObject]@{
@@ -77,240 +179,85 @@ Foreach ($file in $files) {
         FileVersion    = $file.VersionInfo.FileVersion
         ProductVersion = $file.VersionInfo.ProductVersion
         MSIVersion     = $msiVersion
-        Hash           = $encodedhash
+        FileHash       = $encodedhash
     }
+
     $resultArray += $result
 }
 
 # Output result to console
 $resultArray | Format-Table -AutoSize
+$hashesOnDisk = $resultArray.FileHash
 
-# Export result to CSV
-$resultArray | Export-Csv -Path $localContentRepo\LocalContentHashes.csv -NoTypeInformation
+################# 3: Check if the hash of the files in the Local Content Reposity are matched in the Patch My PC catalog #################
 
-If (Test-Path -Path $localContentRepo\LocalContentHashes.csv) {
-    Write-Verbose -Message ("CSV file succesfully exported to '{0}'" -f "$localContentRepo\LocalContentHashes.csv") 
+# Check if the hash exists in the Patch My PC catalog
+$catalogFile = Join-Path -Path $settingsFile -ChildPath 'Latest Catalog\PatchMyPC.xml'
+Write-Verbose -Message ("Loading Patch My PC catalog from '{0}'" -f $catalogFile)
+$xmlContentCommand = Measure-Command { $xmlContent = Get-CatalogXml -CatalogPath $catalogFile }
+Write-Verbose -Message ("It took '{0}' seconds to load '{1}' products from the Patch My PC catalog" -f $xmlContentCommand.TotalSeconds , ($xmlContent.Node | Measure-Object).Count)
+$catalogData = Get-CatalogHash -Catalog $xmlContent -EncodedHashes $hashesOnDisk
+
+# Output Patch My PC hash match to file on disk result to console
+If ($catalogData) {
+    Write-Verbose -Message ("There {0} '{1}' file{2} in the Local Content Repository matching hashes in the Patch My PC catalog" -f $(If (($catalogData | Measure-Object).Count -eq 1) { "is" } Else { "are" }), ($catalogData | Measure-Object).Count, $(If (($catalogData | Measure-Object).Count -ne 1) { "s" } Else { $Null }))
+    $catalogData | Format-Table -AutoSize
 }
 Else {
-    Write-Verbose -Message ("Failed to export CSV file to '{0}'. Check your account has permissions to write to that location." -f "$localContentRepo\LocalContentHashes.csv")
+    Write-Verbose -Message "None of the files found in the Local Content Repository were matched to the Patch My PC catalog"
 }
-# SIG # Begin signature block
-# MIIovgYJKoZIhvcNAQcCoIIorzCCKKsCAQExDzANBglghkgBZQMEAgEFADB5Bgor
-# BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCQoxNRI59IMm7k
-# JTxs8DiMWdQw6BbYqD9mwu9TNmbgGaCCIcEwggWNMIIEdaADAgECAhAOmxiO+dAt
-# 5+/bUOIIQBhaMA0GCSqGSIb3DQEBDAUAMGUxCzAJBgNVBAYTAlVTMRUwEwYDVQQK
-# EwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xJDAiBgNV
-# BAMTG0RpZ2lDZXJ0IEFzc3VyZWQgSUQgUm9vdCBDQTAeFw0yMjA4MDEwMDAwMDBa
-# Fw0zMTExMDkyMzU5NTlaMGIxCzAJBgNVBAYTAlVTMRUwEwYDVQQKEwxEaWdpQ2Vy
-# dCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xITAfBgNVBAMTGERpZ2lD
-# ZXJ0IFRydXN0ZWQgUm9vdCBHNDCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoC
-# ggIBAL/mkHNo3rvkXUo8MCIwaTPswqclLskhPfKK2FnC4SmnPVirdprNrnsbhA3E
-# MB/zG6Q4FutWxpdtHauyefLKEdLkX9YFPFIPUh/GnhWlfr6fqVcWWVVyr2iTcMKy
-# unWZanMylNEQRBAu34LzB4TmdDttceItDBvuINXJIB1jKS3O7F5OyJP4IWGbNOsF
-# xl7sWxq868nPzaw0QF+xembud8hIqGZXV59UWI4MK7dPpzDZVu7Ke13jrclPXuU1
-# 5zHL2pNe3I6PgNq2kZhAkHnDeMe2scS1ahg4AxCN2NQ3pC4FfYj1gj4QkXCrVYJB
-# MtfbBHMqbpEBfCFM1LyuGwN1XXhm2ToxRJozQL8I11pJpMLmqaBn3aQnvKFPObUR
-# WBf3JFxGj2T3wWmIdph2PVldQnaHiZdpekjw4KISG2aadMreSx7nDmOu5tTvkpI6
-# nj3cAORFJYm2mkQZK37AlLTSYW3rM9nF30sEAMx9HJXDj/chsrIRt7t/8tWMcCxB
-# YKqxYxhElRp2Yn72gLD76GSmM9GJB+G9t+ZDpBi4pncB4Q+UDCEdslQpJYls5Q5S
-# UUd0viastkF13nqsX40/ybzTQRESW+UQUOsxxcpyFiIJ33xMdT9j7CFfxCBRa2+x
-# q4aLT8LWRV+dIPyhHsXAj6KxfgommfXkaS+YHS312amyHeUbAgMBAAGjggE6MIIB
-# NjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBTs1+OC0nFdZEzfLmc/57qYrhwP
-# TzAfBgNVHSMEGDAWgBRF66Kv9JLLgjEtUYunpyGd823IDzAOBgNVHQ8BAf8EBAMC
-# AYYweQYIKwYBBQUHAQEEbTBrMCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5kaWdp
-# Y2VydC5jb20wQwYIKwYBBQUHMAKGN2h0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0LmNv
-# bS9EaWdpQ2VydEFzc3VyZWRJRFJvb3RDQS5jcnQwRQYDVR0fBD4wPDA6oDigNoY0
-# aHR0cDovL2NybDMuZGlnaWNlcnQuY29tL0RpZ2lDZXJ0QXNzdXJlZElEUm9vdENB
-# LmNybDARBgNVHSAECjAIMAYGBFUdIAAwDQYJKoZIhvcNAQEMBQADggEBAHCgv0Nc
-# Vec4X6CjdBs9thbX979XB72arKGHLOyFXqkauyL4hxppVCLtpIh3bb0aFPQTSnov
-# Lbc47/T/gLn4offyct4kvFIDyE7QKt76LVbP+fT3rDB6mouyXtTP0UNEm0Mh65Zy
-# oUi0mcudT6cGAxN3J0TU53/oWajwvy8LpunyNDzs9wPHh6jSTEAZNUZqaVSwuKFW
-# juyk1T3osdz9HNj0d1pcVIxv76FQPfx2CWiEn2/K2yCNNWAcAgPLILCsWKAOQGPF
-# mCLBsln1VWvPJ6tsds5vIy30fnFqI2si/xK4VC0nftg62fC2h5b9W9FcrBjDTZ9z
-# twGpn1eqXijiuZQwggauMIIElqADAgECAhAHNje3JFR82Ees/ShmKl5bMA0GCSqG
-# SIb3DQEBCwUAMGIxCzAJBgNVBAYTAlVTMRUwEwYDVQQKEwxEaWdpQ2VydCBJbmMx
-# GTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xITAfBgNVBAMTGERpZ2lDZXJ0IFRy
-# dXN0ZWQgUm9vdCBHNDAeFw0yMjAzMjMwMDAwMDBaFw0zNzAzMjIyMzU5NTlaMGMx
-# CzAJBgNVBAYTAlVTMRcwFQYDVQQKEw5EaWdpQ2VydCwgSW5jLjE7MDkGA1UEAxMy
-# RGlnaUNlcnQgVHJ1c3RlZCBHNCBSU0E0MDk2IFNIQTI1NiBUaW1lU3RhbXBpbmcg
-# Q0EwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAwggIKAoICAQDGhjUGSbPBPXJJUVXH
-# JQPE8pE3qZdRodbSg9GeTKJtoLDMg/la9hGhRBVCX6SI82j6ffOciQt/nR+eDzMf
-# UBMLJnOWbfhXqAJ9/UO0hNoR8XOxs+4rgISKIhjf69o9xBd/qxkrPkLcZ47qUT3w
-# 1lbU5ygt69OxtXXnHwZljZQp09nsad/ZkIdGAHvbREGJ3HxqV3rwN3mfXazL6IRk
-# tFLydkf3YYMZ3V+0VAshaG43IbtArF+y3kp9zvU5EmfvDqVjbOSmxR3NNg1c1eYb
-# qMFkdECnwHLFuk4fsbVYTXn+149zk6wsOeKlSNbwsDETqVcplicu9Yemj052FVUm
-# cJgmf6AaRyBD40NjgHt1biclkJg6OBGz9vae5jtb7IHeIhTZgirHkr+g3uM+onP6
-# 5x9abJTyUpURK1h0QCirc0PO30qhHGs4xSnzyqqWc0Jon7ZGs506o9UD4L/wojzK
-# QtwYSH8UNM/STKvvmz3+DrhkKvp1KCRB7UK/BZxmSVJQ9FHzNklNiyDSLFc1eSuo
-# 80VgvCONWPfcYd6T/jnA+bIwpUzX6ZhKWD7TA4j+s4/TXkt2ElGTyYwMO1uKIqjB
-# Jgj5FBASA31fI7tk42PgpuE+9sJ0sj8eCXbsq11GdeJgo1gJASgADoRU7s7pXche
-# MBK9Rp6103a50g5rmQzSM7TNsQIDAQABo4IBXTCCAVkwEgYDVR0TAQH/BAgwBgEB
-# /wIBADAdBgNVHQ4EFgQUuhbZbU2FL3MpdpovdYxqII+eyG8wHwYDVR0jBBgwFoAU
-# 7NfjgtJxXWRM3y5nP+e6mK4cD08wDgYDVR0PAQH/BAQDAgGGMBMGA1UdJQQMMAoG
-# CCsGAQUFBwMIMHcGCCsGAQUFBwEBBGswaTAkBggrBgEFBQcwAYYYaHR0cDovL29j
-# c3AuZGlnaWNlcnQuY29tMEEGCCsGAQUFBzAChjVodHRwOi8vY2FjZXJ0cy5kaWdp
-# Y2VydC5jb20vRGlnaUNlcnRUcnVzdGVkUm9vdEc0LmNydDBDBgNVHR8EPDA6MDig
-# NqA0hjJodHRwOi8vY3JsMy5kaWdpY2VydC5jb20vRGlnaUNlcnRUcnVzdGVkUm9v
-# dEc0LmNybDAgBgNVHSAEGTAXMAgGBmeBDAEEAjALBglghkgBhv1sBwEwDQYJKoZI
-# hvcNAQELBQADggIBAH1ZjsCTtm+YqUQiAX5m1tghQuGwGC4QTRPPMFPOvxj7x1Bd
-# 4ksp+3CKDaopafxpwc8dB+k+YMjYC+VcW9dth/qEICU0MWfNthKWb8RQTGIdDAiC
-# qBa9qVbPFXONASIlzpVpP0d3+3J0FNf/q0+KLHqrhc1DX+1gtqpPkWaeLJ7giqzl
-# /Yy8ZCaHbJK9nXzQcAp876i8dU+6WvepELJd6f8oVInw1YpxdmXazPByoyP6wCeC
-# RK6ZJxurJB4mwbfeKuv2nrF5mYGjVoarCkXJ38SNoOeY+/umnXKvxMfBwWpx2cYT
-# gAnEtp/Nh4cku0+jSbl3ZpHxcpzpSwJSpzd+k1OsOx0ISQ+UzTl63f8lY5knLD0/
-# a6fxZsNBzU+2QJshIUDQtxMkzdwdeDrknq3lNHGS1yZr5Dhzq6YBT70/O3itTK37
-# xJV77QpfMzmHQXh6OOmc4d0j/R0o08f56PGYX/sr2H7yRp11LB4nLCbbbxV7HhmL
-# NriT1ObyF5lZynDwN7+YAN8gFk8n+2BnFqFmut1VwDophrCYoCvtlUG3OtUVmDG0
-# YgkPCr2B2RP+v6TR81fZvAT6gt4y3wSJ8ADNXcL50CN/AAvkdgIm2fBldkKmKYcJ
-# RyvmfxqkhQ/8mJb2VVQrH4D6wPIOK+XW+6kvRBVK5xMOHds3OBqhK/bt1nz8MIIG
-# sDCCBJigAwIBAgIQCK1AsmDSnEyfXs2pvZOu2TANBgkqhkiG9w0BAQwFADBiMQsw
-# CQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3d3cu
-# ZGlnaWNlcnQuY29tMSEwHwYDVQQDExhEaWdpQ2VydCBUcnVzdGVkIFJvb3QgRzQw
-# HhcNMjEwNDI5MDAwMDAwWhcNMzYwNDI4MjM1OTU5WjBpMQswCQYDVQQGEwJVUzEX
-# MBUGA1UEChMORGlnaUNlcnQsIEluYy4xQTA/BgNVBAMTOERpZ2lDZXJ0IFRydXN0
-# ZWQgRzQgQ29kZSBTaWduaW5nIFJTQTQwOTYgU0hBMzg0IDIwMjEgQ0ExMIICIjAN
-# BgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEA1bQvQtAorXi3XdU5WRuxiEL1M4zr
-# PYGXcMW7xIUmMJ+kjmjYXPXrNCQH4UtP03hD9BfXHtr50tVnGlJPDqFX/IiZwZHM
-# gQM+TXAkZLON4gh9NH1MgFcSa0OamfLFOx/y78tHWhOmTLMBICXzENOLsvsI8Irg
-# nQnAZaf6mIBJNYc9URnokCF4RS6hnyzhGMIazMXuk0lwQjKP+8bqHPNlaJGiTUyC
-# EUhSaN4QvRRXXegYE2XFf7JPhSxIpFaENdb5LpyqABXRN/4aBpTCfMjqGzLmysL0
-# p6MDDnSlrzm2q2AS4+jWufcx4dyt5Big2MEjR0ezoQ9uo6ttmAaDG7dqZy3SvUQa
-# khCBj7A7CdfHmzJawv9qYFSLScGT7eG0XOBv6yb5jNWy+TgQ5urOkfW+0/tvk2E0
-# XLyTRSiDNipmKF+wc86LJiUGsoPUXPYVGUztYuBeM/Lo6OwKp7ADK5GyNnm+960I
-# HnWmZcy740hQ83eRGv7bUKJGyGFYmPV8AhY8gyitOYbs1LcNU9D4R+Z1MI3sMJN2
-# FKZbS110YU0/EpF23r9Yy3IQKUHw1cVtJnZoEUETWJrcJisB9IlNWdt4z4FKPkBH
-# X8mBUHOFECMhWWCKZFTBzCEa6DgZfGYczXg4RTCZT/9jT0y7qg0IU0F8WD1Hs/q2
-# 7IwyCQLMbDwMVhECAwEAAaOCAVkwggFVMBIGA1UdEwEB/wQIMAYBAf8CAQAwHQYD
-# VR0OBBYEFGg34Ou2O/hfEYb7/mF7CIhl9E5CMB8GA1UdIwQYMBaAFOzX44LScV1k
-# TN8uZz/nupiuHA9PMA4GA1UdDwEB/wQEAwIBhjATBgNVHSUEDDAKBggrBgEFBQcD
-# AzB3BggrBgEFBQcBAQRrMGkwJAYIKwYBBQUHMAGGGGh0dHA6Ly9vY3NwLmRpZ2lj
-# ZXJ0LmNvbTBBBggrBgEFBQcwAoY1aHR0cDovL2NhY2VydHMuZGlnaWNlcnQuY29t
-# L0RpZ2lDZXJ0VHJ1c3RlZFJvb3RHNC5jcnQwQwYDVR0fBDwwOjA4oDagNIYyaHR0
-# cDovL2NybDMuZGlnaWNlcnQuY29tL0RpZ2lDZXJ0VHJ1c3RlZFJvb3RHNC5jcmww
-# HAYDVR0gBBUwEzAHBgVngQwBAzAIBgZngQwBBAEwDQYJKoZIhvcNAQEMBQADggIB
-# ADojRD2NCHbuj7w6mdNW4AIapfhINPMstuZ0ZveUcrEAyq9sMCcTEp6QRJ9L/Z6j
-# fCbVN7w6XUhtldU/SfQnuxaBRVD9nL22heB2fjdxyyL3WqqQz/WTauPrINHVUHmI
-# moqKwba9oUgYftzYgBoRGRjNYZmBVvbJ43bnxOQbX0P4PpT/djk9ntSZz0rdKOtf
-# JqGVWEjVGv7XJz/9kNF2ht0csGBc8w2o7uCJob054ThO2m67Np375SFTWsPK6Wrx
-# oj7bQ7gzyE84FJKZ9d3OVG3ZXQIUH0AzfAPilbLCIXVzUstG2MQ0HKKlS43Nb3Y3
-# LIU/Gs4m6Ri+kAewQ3+ViCCCcPDMyu/9KTVcH4k4Vfc3iosJocsL6TEa/y4ZXDlx
-# 4b6cpwoG1iZnt5LmTl/eeqxJzy6kdJKt2zyknIYf48FWGysj/4+16oh7cGvmoLr9
-# Oj9FpsToFpFSi0HASIRLlk2rREDjjfAVKM7t8RhWByovEMQMCGQ8M4+uKIw8y4+I
-# Cw2/O/TOHnuO77Xry7fwdxPm5yg/rBKupS8ibEH5glwVZsxsDsrFhsP2JjMMB0ug
-# 0wcCampAMEhLNKhRILutG4UI4lkNbcoFUCvqShyepf2gpx8GdOfy1lKQ/a+FSCH5
-# Vzu0nAPthkX0tGFuv2jiJmCG6sivqf6UHedjGzqGVnhOMIIGwjCCBKqgAwIBAgIQ
-# BUSv85SdCDmmv9s/X+VhFjANBgkqhkiG9w0BAQsFADBjMQswCQYDVQQGEwJVUzEX
-# MBUGA1UEChMORGlnaUNlcnQsIEluYy4xOzA5BgNVBAMTMkRpZ2lDZXJ0IFRydXN0
-# ZWQgRzQgUlNBNDA5NiBTSEEyNTYgVGltZVN0YW1waW5nIENBMB4XDTIzMDcxNDAw
-# MDAwMFoXDTM0MTAxMzIzNTk1OVowSDELMAkGA1UEBhMCVVMxFzAVBgNVBAoTDkRp
-# Z2lDZXJ0LCBJbmMuMSAwHgYDVQQDExdEaWdpQ2VydCBUaW1lc3RhbXAgMjAyMzCC
-# AiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAKNTRYcdg45brD5UsyPgz5/X
-# 5dLnXaEOCdwvSKOXejsqnGfcYhVYwamTEafNqrJq3RApih5iY2nTWJw1cb86l+uU
-# UI8cIOrHmjsvlmbjaedp/lvD1isgHMGXlLSlUIHyz8sHpjBoyoNC2vx/CSSUpIIa
-# 2mq62DvKXd4ZGIX7ReoNYWyd/nFexAaaPPDFLnkPG2ZS48jWPl/aQ9OE9dDH9kgt
-# XkV1lnX+3RChG4PBuOZSlbVH13gpOWvgeFmX40QrStWVzu8IF+qCZE3/I+PKhu60
-# pCFkcOvV5aDaY7Mu6QXuqvYk9R28mxyyt1/f8O52fTGZZUdVnUokL6wrl76f5P17
-# cz4y7lI0+9S769SgLDSb495uZBkHNwGRDxy1Uc2qTGaDiGhiu7xBG3gZbeTZD+BY
-# QfvYsSzhUa+0rRUGFOpiCBPTaR58ZE2dD9/O0V6MqqtQFcmzyrzXxDtoRKOlO0L9
-# c33u3Qr/eTQQfqZcClhMAD6FaXXHg2TWdc2PEnZWpST618RrIbroHzSYLzrqawGw
-# 9/sqhux7UjipmAmhcbJsca8+uG+W1eEQE/5hRwqM/vC2x9XH3mwk8L9CgsqgcT2c
-# kpMEtGlwJw1Pt7U20clfCKRwo+wK8REuZODLIivK8SgTIUlRfgZm0zu++uuRONhR
-# B8qUt+JQofM604qDy0B7AgMBAAGjggGLMIIBhzAOBgNVHQ8BAf8EBAMCB4AwDAYD
-# VR0TAQH/BAIwADAWBgNVHSUBAf8EDDAKBggrBgEFBQcDCDAgBgNVHSAEGTAXMAgG
-# BmeBDAEEAjALBglghkgBhv1sBwEwHwYDVR0jBBgwFoAUuhbZbU2FL3MpdpovdYxq
-# II+eyG8wHQYDVR0OBBYEFKW27xPn783QZKHVVqllMaPe1eNJMFoGA1UdHwRTMFEw
-# T6BNoEuGSWh0dHA6Ly9jcmwzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0ZWRH
-# NFJTQTQwOTZTSEEyNTZUaW1lU3RhbXBpbmdDQS5jcmwwgZAGCCsGAQUFBwEBBIGD
-# MIGAMCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5kaWdpY2VydC5jb20wWAYIKwYB
-# BQUHMAKGTGh0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0
-# ZWRHNFJTQTQwOTZTSEEyNTZUaW1lU3RhbXBpbmdDQS5jcnQwDQYJKoZIhvcNAQEL
-# BQADggIBAIEa1t6gqbWYF7xwjU+KPGic2CX/yyzkzepdIpLsjCICqbjPgKjZ5+PF
-# 7SaCinEvGN1Ott5s1+FgnCvt7T1IjrhrunxdvcJhN2hJd6PrkKoS1yeF844ektrC
-# QDifXcigLiV4JZ0qBXqEKZi2V3mP2yZWK7Dzp703DNiYdk9WuVLCtp04qYHnbUFc
-# jGnRuSvExnvPnPp44pMadqJpddNQ5EQSviANnqlE0PjlSXcIWiHFtM+YlRpUurm8
-# wWkZus8W8oM3NG6wQSbd3lqXTzON1I13fXVFoaVYJmoDRd7ZULVQjK9WvUzF4UbF
-# KNOt50MAcN7MmJ4ZiQPq1JE3701S88lgIcRWR+3aEUuMMsOI5ljitts++V+wQtaP
-# 4xeR0arAVeOGv6wnLEHQmjNKqDbUuXKWfpd5OEhfysLcPTLfddY2Z1qJ+Panx+VP
-# NTwAvb6cKmx5AdzaROY63jg7B145WPR8czFVoIARyxQMfq68/qTreWWqaNYiyjvr
-# moI1VygWy2nyMpqy0tg6uLFGhmu6F/3Ed2wVbK6rr3M66ElGt9V/zLY4wNjsHPW2
-# obhDLN9OTH0eaHDAdwrUAuBcYLso/zjlUlrWrBciI0707NMX+1Br/wd3H3GXREHJ
-# uEbTbDJ8WC9nR2XlG3O2mflrLAZG70Ee8PBf4NvZrZCARK+AEEGKMIIIADCCBeig
-# AwIBAgIQD0un28igrZOh2Z+6mD8+TTANBgkqhkiG9w0BAQsFADBpMQswCQYDVQQG
-# EwJVUzEXMBUGA1UEChMORGlnaUNlcnQsIEluYy4xQTA/BgNVBAMTOERpZ2lDZXJ0
-# IFRydXN0ZWQgRzQgQ29kZSBTaWduaW5nIFJTQTQwOTYgU0hBMzg0IDIwMjEgQ0Ex
-# MB4XDTIyMDkxNTAwMDAwMFoXDTI1MDkxMDIzNTk1OVowgdExEzARBgsrBgEEAYI3
-# PAIBAxMCVVMxGTAXBgsrBgEEAYI3PAIBAhMIQ29sb3JhZG8xHTAbBgNVBA8MFFBy
-# aXZhdGUgT3JnYW5pemF0aW9uMRQwEgYDVQQFEwsyMDEzMTYzODMyNzELMAkGA1UE
-# BhMCVVMxETAPBgNVBAgTCENvbG9yYWRvMRQwEgYDVQQHEwtDYXN0bGUgUm9jazEZ
-# MBcGA1UEChMQUGF0Y2ggTXkgUEMsIExMQzEZMBcGA1UEAxMQUGF0Y2ggTXkgUEMs
-# IExMQzCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAPKfoNjLgEqzlwL/
-# aZLSldCkRTfZQ1jvb6ZMhZYoxUdNpzUEGNpbdTB9NNg9rQdZCvPDFYxhz00bOtwF
-# dzzrO3V+4GxSPK7BBKkCASx5Oe9rVG9u0vmU2vCsnROMtczK8UBiERD+/W+FYN2A
-# gQwdYaUsaPMT/QNlfVuhOEjFQXBYoCMMO/cNXUQLZkIwF4GacaGMh9TUSub8K9y8
-# OMz5AQyjmfTxUrBLUzi0WJS1eDoTAeJ7BIrvT7+je+gEtYe9OpIz2gTJmYUykIUs
-# Ix7A8OtTyp6j7tdMDahwyW1DXvUnFQHUViXisvajSiuCGePtet1lc+wyJizGF6Iv
-# MBjw/xLk/38ZARs44iNFNVyEvga6L4pWOPp4Ul9VmFrqWTp8Pt4sppA7yE/1OjsY
-# A0Xk0x3m6HiUiCUjwhY8eRhBCp5me+1SR8LHwhsS2TSO8rYkaFjctnRpjpwhqN2h
-# Z/q7WIIhmZRoHxH0RPQrPJPHkdBes7OM7SVrZTts7IhREXR4PXeeCRDWiNIIb6pT
-# mJiUGnrx7gy0ayilUOfEPbw0I2PSckBXfvqxxvnJGr+BZWYhIUC6/cHUhqwfFVN7
-# tq8nYiAGSLLFhJT1vJWGZBVVNbpDC9joAbu9SvD48at2TrOf6iHpz/yhgC+iPhji
-# oJRMOJK2Km0U0jC0dqtJhJNmfZeXAgMBAAGjggI5MIICNTAfBgNVHSMEGDAWgBRo
-# N+Drtjv4XxGG+/5hewiIZfROQjAdBgNVHQ4EFgQUvTyL42xnOtRlK27xT25Ih8aM
-# TPcwMgYDVR0RBCswKaAnBggrBgEFBQcIA6AbMBkMF1VTLUNPTE9SQURPLTIwMTMx
-# NjM4MzI3MA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDAzCBtQYD
-# VR0fBIGtMIGqMFOgUaBPhk1odHRwOi8vY3JsMy5kaWdpY2VydC5jb20vRGlnaUNl
-# cnRUcnVzdGVkRzRDb2RlU2lnbmluZ1JTQTQwOTZTSEEzODQyMDIxQ0ExLmNybDBT
-# oFGgT4ZNaHR0cDovL2NybDQuZGlnaWNlcnQuY29tL0RpZ2lDZXJ0VHJ1c3RlZEc0
-# Q29kZVNpZ25pbmdSU0E0MDk2U0hBMzg0MjAyMUNBMS5jcmwwPQYDVR0gBDYwNDAy
-# BgVngQwBAzApMCcGCCsGAQUFBwIBFhtodHRwOi8vd3d3LmRpZ2ljZXJ0LmNvbS9D
-# UFMwgZQGCCsGAQUFBwEBBIGHMIGEMCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5k
-# aWdpY2VydC5jb20wXAYIKwYBBQUHMAKGUGh0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0
-# LmNvbS9EaWdpQ2VydFRydXN0ZWRHNENvZGVTaWduaW5nUlNBNDA5NlNIQTM4NDIw
-# MjFDQTEuY3J0MAwGA1UdEwEB/wQCMAAwDQYJKoZIhvcNAQELBQADggIBAFdPoh+i
-# Ebsklh04Gal6DTgKSnw/5mO/k4oXMPKhmP/eYgTfvf2hwSewe9W2IK2/VH0HutUM
-# k603cVtcyK1ppiDkR0MTshD7BVWHeAXJQmAjLQUr83vLh4WhPOZ2+R+GxWT3s1Ts
-# /LFAF5qYHpd5+PhbLtSB/px50k0ouX/Dc/kYtKYN7/VBve01gkV+pbBsVRNvjv2T
-# fAMTBDongJD3J5J+fy7PVZVGFvLpjZRtQjHeai6vM7Lwuh9o/dtPTQV7abeP8hmO
-# xhQ9qRMXYSeoFkTw8+d/9/wPoQzBuwxN1gNSCRGEof4NamrcnUHtOCcrUWbKAE3r
-# eqAtZPHFqiVBCwUCUADZ00mDtwZ7qEOUp71l/1K1j3rNLXGSkkONuHbIaZA3PsCq
-# s0ltIE6/5Od8QfJRK2wkUu4vaumgQKJXKDinqMTXi4eTsjq1D6+qsp6vnc+O2xw3
-# 6yzs8CUyolD14fRRDb2QNvHlWzuG/JgsRsm+HY7Yp8vIqVc73PFor6+Fe2BMnTCN
-# bVkEV5Xi3dekkTYAV/sQxd8XlOBK+iHo/Ht4ggyzqhYjNfdXrD4Xh0zBsJfOIceO
-# ZY2+mb3mPg5otvURSJS8EpIHWlRBalzzLJwwdY4yz9pU05L250wEY+iUyowJR5BD
-# nvokCtKa07dYpdwxvYE1l5Iz6NBCEr4SMbvRMYIGUzCCBk8CAQEwfTBpMQswCQYD
-# VQQGEwJVUzEXMBUGA1UEChMORGlnaUNlcnQsIEluYy4xQTA/BgNVBAMTOERpZ2lD
-# ZXJ0IFRydXN0ZWQgRzQgQ29kZSBTaWduaW5nIFJTQTQwOTYgU0hBMzg0IDIwMjEg
-# Q0ExAhAPS6fbyKCtk6HZn7qYPz5NMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQB
-# gjcCAQwxCjAIoAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYK
-# KwYBBAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIO+OYJ9+
-# GHfWuCy9rd+pf3SiG4ZKxRCOcY6Nv5fkni1KMA0GCSqGSIb3DQEBAQUABIICAFxB
-# e/XRz2MbCpcEUSyf77ekGBufhiANvRtzqBVe2RHce8To1TAClpdWItD32Jb4J/gM
-# 2OQ/6jme68AjjKAC3j/HGjbHSJ8EyRHvHMNjFXTlMRPsePYGupLujQixEp2beG1I
-# RMM4IM3ZUhMyx7iZR0EPtYqY6mA4g/Oz8ICdBqV0RA0WvAvAVB+5C3O/j/Zt+Vwj
-# r92Gh7Dw6Y9BHX3AD59O1GpsmnFMpsTNkZJ1Zhfbe/vGsgFrhsuwbzT29p0sWTP3
-# LXVd7yJ0UCre788MgShhDDgLQLTKgWRZsRV3xtjy759SCTq3+bd82Rs4OOuXJhLW
-# eefoS7sdGe51/QBJVZQ+yA3Du15spSuPCyN20ih6BPWhrtHNznP7EYRXEPYHL0Po
-# Tbr2QwVe6S4QkijyHKvrhRV2q4BhydRT+5h5PUIwOJ+4Rl2X7yIOPI149B4MBxSH
-# 2xkIt1W8iWfdU3yPUFIEzXAhk+fS5e6Bdym4quHi7FIrSjfHkUHfsqKqyQv+TPio
-# u5/Do+v2nnlOFe8JYTUVXNsCzagyanhBSoDDs0zahNggwhImYcXV448vJz8h6YdD
-# AAjCIbrZ4XU0YTykK5BmJM/unIqKSNCySERRYNoCJHXRN8Mr1fgSAhZ7h7fEC0Lt
-# 4iTrH6/c43czdtB065PdGbIguVRPaOZb5iv6oJ7ToYIDIDCCAxwGCSqGSIb3DQEJ
-# BjGCAw0wggMJAgEBMHcwYzELMAkGA1UEBhMCVVMxFzAVBgNVBAoTDkRpZ2lDZXJ0
-# LCBJbmMuMTswOQYDVQQDEzJEaWdpQ2VydCBUcnVzdGVkIEc0IFJTQTQwOTYgU0hB
-# MjU2IFRpbWVTdGFtcGluZyBDQQIQBUSv85SdCDmmv9s/X+VhFjANBglghkgBZQME
-# AgEFAKBpMBgGCSqGSIb3DQEJAzELBgkqhkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8X
-# DTIzMTAyMTExNTk0M1owLwYJKoZIhvcNAQkEMSIEIHCZ1eUHYhFPw1dTdjA8q5lX
-# 5c+EpYI0G+dfd4ui/jwnMA0GCSqGSIb3DQEBAQUABIICAFMIK/wbgOyEcn9Uoayt
-# 2QahOk3wgzbjrJ2Uiti5IhutFoBk7vITIJBieCxkhTQYdTNXFzuZh56bnAJG9K6e
-# utAAsnThcK1M/oqW4hFPhkPvdSiTjP+gY114/mjXj4ttJU251qyw0t7Sjgpbm81i
-# gneqHMWBs7EQRes7ELLAWBNLhNstzflwFRmBfsjT1tlacbbUL1PD7riPYBr2Vjng
-# FKoklArymfaVG17MeyGpt9pOto2nIDRVtIcYwqmgSJ49U7nclmGDPmvNxz4FNQ92
-# VTJ/dBFmJa3Oi5eGzh+viYElbJC3XEXvCPt1jADtzEVdNV7qrlaogV7IKcPVNLrM
-# B2txbKoTvm4KA3lLna6oYdE+ktqtHXCq1aNalblkWlnVvwwsQuSovY3QemAmvDEw
-# 0r+/JmjWhjADAVgW9c5SaCH459+uYsYTSrWdNou4OvbfCcHhyVqOyAjLXHn14gHi
-# f4NAeDtKZkRbL6vsH/KfXkJuOD5B3+LgSJ724khkT6yYQoADWOptuv2gkWQnsoqD
-# GJEgKHyFGxNLJuCYS2aBGhmFruXVh3m7YSiIk1EiONSogtB/vB+oYiRuJYU+rOzS
-# o8nPERu85m11TokM8BYcm9wZqeUJ3Vytrt8gQnyRKB4/BgudrTHJ8q3LYD+aIm2+
-# WHkGcxYW1t5qhCtK2plvsMoZ
-# SIG # End signature block
+
+################# 4: Merge Local Content Repository and catalog data results and prepare for CSV export of results #################
+
+# Merge Catalog data to result array
+$mergedArray = @()
+ForEach ($result in $resultArray) {
+    $newArrayResults = [PSCustomObject]@{
+        Name            = $result.Name
+        FileVersion     = $result.FileVersion
+        ProductVersion  = $result.ProductVersion
+        MSIVersion      = $result.MSIVersion
+        FileHash        = $result.FileHash
+        CatMatch        = $false
+        CatTitle        = $Null
+        CatFileName     = $Null
+        CatFileHash     = $Null
+        CatFileBulletin = $Null
+    }
+
+    ForEach ($catResult in $catalogData) {
+        
+        If ($result.FileHash -eq $catResult.CatFileHash) {
+            $newArrayResults.CatMatch = $true
+            $newArrayResults.CatTitle = $catResult.CatTitle
+            $newArrayResults.CatFileName = $catResult.CatFileName
+            $newArrayResults.CatFileHash = $catResult.CatFileHash
+            $newArrayResults.CatFileBulletin = $catResult.CatBulletin
+        } 
+    }
+    $mergedArray += $newArrayResults
+}
+
+# Export results to CSV, preferring the Local Content Repository location first and then the current working directory
+Try {
+    $mergedArray | Export-Csv -Path $localContentRepo\LocalContentHashes.csv -NoTypeInformation -ErrorAction Continue
+
+    If (Test-Path -Path $localContentRepo\LocalContentHashes.csv) {
+        Write-Verbose -Message ("CSV file succesfully exported to '{0}'" -f "$localContentRepo\LocalContentHashes.csv") 
+    }
+}
+Catch {
+    Write-Verbose -Message ("Failed to export CSV file to '{0}': {1}" -f "$localContentRepo\LocalContentHashes.csv", $_)
+}
+If (-not (Test-Path -Path $localContentRepo\LocalContentHashes.csv)) {
+    Write-Verbose -Message ("Failed to export CSV file to '{0}'. Check your account has permissions to write to that location. Trying to save instead to current working directory..." -f "$localContentRepo\LocalContentHashes.csv")
+    Try {
+        $mergedArray | Export-Csv -Path .\LocalContentHashes.csv -NoTypeInformation
+        If (Test-Path -Path .\LocalContentHashes.csv) {
+            Write-Verbose -Message ("CSV file succesfully exported to '{0}'" -f (((Get-Location).Path, "\LocalContentHashes.csv") -join ""))
+        }
+    }
+    Catch {
+        Write-Verbose -Message ("Failed to export CSV file to '{0}'. Check your account has permissions to write to that location." -f ((Get-Location).Path, "\LocalContentHashes.csv") -join "")
+    }
+}
