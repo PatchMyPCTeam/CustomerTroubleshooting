@@ -128,16 +128,22 @@ $contentQueryResults = Get-WmiObject -Query $contentQuery -Namespace "root\sms\s
 
 # Process the results
 if ($contentQueryResults) {
-    foreach ($appContent in $contentQueryResults) {
+    $allMatchingApps = foreach ($appContent in $contentQueryResults) {
         $appQuery = "SELECT * FROM SMS_ApplicationLatest where ModelName = '$($appContent.SecurityKey)'"
         Write-Verbose "Querying SMS provider $SMSProvider for application matching [SecurityKey: $($appContent.SecurityKey)] [Query: $appQuery]"
         $appQueryResults = Get-WmiObject -Query $appQuery -Namespace "root\sms\site_$SiteCode" -ComputerName $SMSProvider
         if ($appQueryResults) {
-            return $appQueryResults
+            $appQueryResults
         }
         else {
             Write-Host "No matching application found for content source $($appContent.SecurityKey)."
         }
+    }
+    if ($allMatchingApps) {
+        $allMatchingApps
+    }
+    else {
+        Write-Host "No matching applications found."
     }
 } else {
     Write-Host "No matching content sources found."
@@ -145,8 +151,8 @@ if ($contentQueryResults) {
 # SIG # Begin signature block
 # MIIovgYJKoZIhvcNAQcCoIIorzCCKKsCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDnjj0752N5yDmB
-# RrCCcQt6gpi+rhVxgfQjW68Z7F0TkKCCIcEwggWNMIIEdaADAgECAhAOmxiO+dAt
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDd3z8aPZZQn9ZQ
+# w/6FzRmY/H3Bd+r9bs/FhBfCEYl5EqCCIcEwggWNMIIEdaADAgECAhAOmxiO+dAt
 # 5+/bUOIIQBhaMA0GCSqGSIb3DQEBDAUAMGUxCzAJBgNVBAYTAlVTMRUwEwYDVQQK
 # EwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xJDAiBgNV
 # BAMTG0RpZ2lDZXJ0IEFzc3VyZWQgSUQgUm9vdCBDQTAeFw0yMjA4MDEwMDAwMDBa
@@ -331,34 +337,34 @@ if ($contentQueryResults) {
 # ZXJ0IFRydXN0ZWQgRzQgQ29kZSBTaWduaW5nIFJTQTQwOTYgU0hBMzg0IDIwMjEg
 # Q0ExAhAPS6fbyKCtk6HZn7qYPz5NMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQB
 # gjcCAQwxCjAIoAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYK
-# KwYBBAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIFGse0mr
-# ZuGJv7/iP3uXMT3FyY/c20CJSNN+bMYD2r/TMA0GCSqGSIb3DQEBAQUABIICAIcS
-# yXwfx7DCIv4CwQb9sr7DU1AsZZmUkhObF+sBRaI9GIcyllFCPeWs15nUouxLwAJ7
-# /g32y5EAgz3Hx/h7TMnm8WJJ5DisOyTDM2PLzuFYakqRM6HbOH7JeMo+9JFNi15b
-# Um1njlbb6C+1pXEpiUHTYn2wKACTghyaLNcUYC8nv1BD1lh/xst8k3lFOku+VZUB
-# FxQbHiYK/EPTgjG4DCrJ1xpvmpoF7j09YLzqlTSecWyN/MyfPg3OtIzR1bG5O5SJ
-# 8VqnlTx/HSMmaSV9rQiHyhxc/qGJLjDQma1gHWDiM38+Mtj2kMKvbjjN2LOt2hhr
-# KR7laj3X3ZXtDDG7fyFrgGK1vIHizCFolmva7MQ3ZfRBQ9HP2tvtJD0WQBn3UauF
-# h+jQzqceCL5VKv5/RTbJUAEoYihkk9EonV5NHmeLmaZ+22ZbhtANc6eTzisE82py
-# 9MCLwfpb9O9dHXG7IjmldOunrIzC+Sg1KEmFZf2bQVD3E3h8q3ffcdR34og0KFyQ
-# oEbLckRKinH5f6uCF3dA8Dc9WHRdNZAyEj9hTcFsXDWL476Iup1yu/0xpWsVjgh+
-# 5A1u4GNvo0tsoiBCiXKT7Vx7OFburINvaJzBH1mWMVtyIV5qPlM/fcPOXsQma1Et
-# ORB3wZk8PtzNjFyyASBs+V2Pdsdr15q05ai5+a6SoYIDIDCCAxwGCSqGSIb3DQEJ
+# KwYBBAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIMa48B6x
+# b3OI6jlUES3aLEJ5plxS7DcWNswn/dCYDT+xMA0GCSqGSIb3DQEBAQUABIICACz2
+# 6cC0DPwoJzbpd9vdRKG2fMJz611fz/3rthk8HfWOfeVYtB/CcjOmYV9iJ3KEpBK+
+# 8aOIOlcHnMWFJPwbp4yinmVHjF3c5GBq/qbi4ZvjFkKIVOmUM5rN6BJ7ILEdohml
+# CHp+TKyqExfSEr+f7TGDSH8XqaXYyC1JGi00BB8PrqFttsOaZMArf0/ABZnCR8gx
+# rtujbXis7aFzQzCpgB2bThVa/6ZZ42JQPPnKDtib/0DUJP31npPsS/Z4P7JkeGMW
+# k5tUvO8QbYQSr/vLV/LpZQI650doxMgQfifkbQHXSURNQRdi0RrWUDZw1tw5sP0V
+# HmQ1zBkKt83EPp8urULejvOzPP1qy9LH5KOMsDrVx5onym4VX1kdUD9r46/q6R0p
+# fM/EX9e8UI6NK1CUU58SHCxbBLMYzdktm08d0RqeSbVZSvMsc9rKQq778+q3pj3W
+# 4kcDUbu37G7uZEYCX1DGqIwy9wVzkLp+hB7WwrEjDD/6iubQN3j0sIjz+k9CtYPT
+# aMWpNMYHbWFzd12gMPdd+AMjQrcV0nWIGZ7U/O3DZYEDSKSTswmckAly6hbE4EOC
+# hOgqAyJMt53da+JkgqKNLDhM7S7T26NmETVqGzgJc/dMaAx99pEC9S7Hhx+4CLr0
+# htxazQrSS7Xo9QRFT7UJTStxMEzZfGzaa/Jnd38NoYIDIDCCAxwGCSqGSIb3DQEJ
 # BjGCAw0wggMJAgEBMHcwYzELMAkGA1UEBhMCVVMxFzAVBgNVBAoTDkRpZ2lDZXJ0
 # LCBJbmMuMTswOQYDVQQDEzJEaWdpQ2VydCBUcnVzdGVkIEc0IFJTQTQwOTYgU0hB
 # MjU2IFRpbWVTdGFtcGluZyBDQQIQBUSv85SdCDmmv9s/X+VhFjANBglghkgBZQME
 # AgEFAKBpMBgGCSqGSIb3DQEJAzELBgkqhkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8X
-# DTIzMTAyNzEyNTEzM1owLwYJKoZIhvcNAQkEMSIEIIqc6EejTpreLbkpmRsqqcMq
-# 2zj1PZUUkQBlYSJ/AdCyMA0GCSqGSIb3DQEBAQUABIICACzPlU3HRMs+i3WYh8SE
-# RImMTf8xOp68PxK6URbIA+hFbX/0mdLj/FJg5+9JOmSXv4+ptcx1wNXtZ5bv9W9k
-# dNCy20Fyrscn76ipKLhhU1qgSuYjUfqIfhOinSBbEGAv0K2hoT1uDDahU+bwPVeR
-# YhJ2RqSfyOppkD5N5m+R4u1YVACBq0YDKPQ6IeoHbq+xUmceCvMtHvv6vyyzPjQh
-# IX4kqbBgv2Plp8DuDACXq5xt6i6nLTcogYnEAvO6NYuSK4ZCEDjf8N29X1aTbFby
-# yTJ/jR0WIuCxQyxFLUg1LLBgTzpyA7aEBNzK5OLA5OpyKZ0lyoJAaP8ldgvW9kE5
-# MJ4hl6E/JNT+iZf28GR7xHP6LZFd+GpdEU8es6L+lqsNW1uUcp9zASinEQcEUoPi
-# waMumkW40MqwGEJ57XKgzH+pONS3JOB2IDSLxezYxM+HdnGdT3FTBPeOltdXetpy
-# xqOWiVt4XrW1sk5wvrCs45U35kNWqEBDMR4PnFi8zjJwQt5enl3d7IdVopWP1lIF
-# RjT9RIDl4OsUuBMixjoglT3ol/27gu7ZgvZ5/HN4dqGLHrqqUcuVvZct0yjRBwj3
-# QnZkfKRnucBRLdZkzNzOCHeOjyVYkzZW7Zb9Bsp7wFxNUmd431jlvW+NZzC+Eu5o
-# uC7BCrbA/+PZLjBSrYg595g3
+# DTIzMTAyNzEyNTUyMlowLwYJKoZIhvcNAQkEMSIEIP8rLJKRiFIeQTSFczZZZOGi
+# I/BNRM1/lrTLHIwJQM4bMA0GCSqGSIb3DQEBAQUABIICAJR2E+A+ilpuNUd4icKY
+# CVFfFIUMZAXmPVIe1Bj5bvSavpIniA1lCgjKzH/O3DW1DLu9st/wudsN2AnXE1qI
+# QhLqh+Apo9Nm39YsiJOViwFWK/Y9OM8a/sdpF2Szz2atJE8sos3HzXppZ3N3DVJB
+# 7T0P/qD6FRC/4xKIkDBaV/mwnssn43HIyecKxe6WRFOyGb2ZqTHP3zNG8cfFUKJM
+# +yeLPzSu3KcVM6LcvwrjbVh3seYhW94+oJpljcPOTSaLeD9yBGTp5ogz9w/vFEVR
+# bHgGmznsAQfhg93Wnh9MZr9uMK7xMYSgwDfA8lxPbob5eH4QYMiKIwlC5mmquu6i
+# LTSMmyN+B0YUyXRB1OTY1sda/ShMSqxTlcocHANPm6T91gsosLQSaDkd4R7YHBe4
+# 5ckZJG1PKwx6pNJjGbkoxYJAOVD7Oe8KHsiadGoUwyMe6ZFpNKrJUPE14grv6bf/
+# ytkoKmdmpqWqTytt5tUmOKfRkzsJfe61fcVuGzCUeUsrMmLj01kxpHKfaPHP57k7
+# 1sgSg5qZR08esVDatFVY/A+lRs+5edLZwa0DD/E60qKirickEJQcCDbIslG1/Rxb
+# 9hj7J7ADiyjB4lDrlSV3MSSrT3Vamtf8SChT+hnKRqh00FZA8RlFV+hToLqkBr+Y
+# z6ONtvHlNnPzHem9hUQUdJt9
 # SIG # End signature block
