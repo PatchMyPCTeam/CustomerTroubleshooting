@@ -1,15 +1,13 @@
 <#
 .SYNOPSIS
-    Query the SMS provider for content sources matching a specified path. It will return the content ID, content source, content unique ID, and security key for each matching content source.
-
-    Note that the security key can be used to search in the ConfigMigr console under Monitoring > Distribution Status > Content Status
+    Query the SMS provider for applications with content sources matching a specified path. 
 
 .DESCRIPTION
     This script queries a Configuration Manager (ConfigMgr) SMS provider for content sources
     matching a given path. It takes a site code, SMS provider, and a path as input parameters
     and uses Windows Management Instrumentation (WMI) to perform the query.
 
-    Note that the security key can be used to search in the ConfigMigr console under Monitoring > Distribution Status > Content Status
+    Instances of SMS_ApplicationLatest are returned
 
 .PARAMETER SiteCode
     The site code of the Configuration Manager site to connect to.
@@ -147,8 +145,8 @@ if ($contentQueryResults) {
 # SIG # Begin signature block
 # MIIovgYJKoZIhvcNAQcCoIIorzCCKKsCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAJ6T+cKCrkyYex
-# p4b+9cxZFgu92fIotYsGm8u1bMrPdqCCIcEwggWNMIIEdaADAgECAhAOmxiO+dAt
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDnjj0752N5yDmB
+# RrCCcQt6gpi+rhVxgfQjW68Z7F0TkKCCIcEwggWNMIIEdaADAgECAhAOmxiO+dAt
 # 5+/bUOIIQBhaMA0GCSqGSIb3DQEBDAUAMGUxCzAJBgNVBAYTAlVTMRUwEwYDVQQK
 # EwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xJDAiBgNV
 # BAMTG0RpZ2lDZXJ0IEFzc3VyZWQgSUQgUm9vdCBDQTAeFw0yMjA4MDEwMDAwMDBa
@@ -333,34 +331,34 @@ if ($contentQueryResults) {
 # ZXJ0IFRydXN0ZWQgRzQgQ29kZSBTaWduaW5nIFJTQTQwOTYgU0hBMzg0IDIwMjEg
 # Q0ExAhAPS6fbyKCtk6HZn7qYPz5NMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQB
 # gjcCAQwxCjAIoAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYK
-# KwYBBAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIBAPm/cn
-# T5C5qblXIlu5asS/oB4WLeoDGyRTVRvwCDbWMA0GCSqGSIb3DQEBAQUABIICAAef
-# vkrwZi9W+fvG7cvMJA9AuxalQ2/jF3YkcfEQzjRnifEz0xNoBtq+7VehcAQqt9IK
-# +GZ3BfLwXol0xd7Bv6/CVxsicVpRCuGvB5M3sMulXEt+WYmnpAVcMJyDwSFvQytr
-# Ov8NeuuPKF+vQUbXUCFC81QLRMbuu1cadGvwNnMoqI71QlinjVG1hzSYVlcE2voV
-# 0Kpju9LDkVp21f7euATgT3JmSuZfNgD+qFw6QstlPw1vOSC74fP9k6HhREca3cVI
-# xoR/aG1Qr8Cccl3nADdXGJkizKslVPn3e1bmFyjcVoFi2mPYNLsQRLBu7EYUNNa8
-# tciK+3RfNaLWUdDZz5NadP0bhjcQ/RrCf/awvof+ITFGm8yn0zLr80S6+B0J3eyc
-# 7VsVNokYt2/5dH0b5x8AfNrHcr1hR/5WX1PZ/LBVX8roDPYlm0GS7X3XKQNI9Zja
-# tWl6RrYCA+k+G+l444OHh53RsRFmy9xDrRGMArnLtNa2TJrhOQxodMwiyH32lw9E
-# OO7y1winf55fOT3ccrDtPsMAe5pH78M6fy1viicneBJE1SmQkNC7nYjMc2KHL0S+
-# J9oCJG2ibBOxO7uMZ2pOyATu2i5aENa5U/lIVXQusu6o45RV015NumUjRwS4RlKP
-# vC9snFQF6X0dum3vaBLVTttYHZWDTKkORXvm7soXoYIDIDCCAxwGCSqGSIb3DQEJ
+# KwYBBAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIFGse0mr
+# ZuGJv7/iP3uXMT3FyY/c20CJSNN+bMYD2r/TMA0GCSqGSIb3DQEBAQUABIICAIcS
+# yXwfx7DCIv4CwQb9sr7DU1AsZZmUkhObF+sBRaI9GIcyllFCPeWs15nUouxLwAJ7
+# /g32y5EAgz3Hx/h7TMnm8WJJ5DisOyTDM2PLzuFYakqRM6HbOH7JeMo+9JFNi15b
+# Um1njlbb6C+1pXEpiUHTYn2wKACTghyaLNcUYC8nv1BD1lh/xst8k3lFOku+VZUB
+# FxQbHiYK/EPTgjG4DCrJ1xpvmpoF7j09YLzqlTSecWyN/MyfPg3OtIzR1bG5O5SJ
+# 8VqnlTx/HSMmaSV9rQiHyhxc/qGJLjDQma1gHWDiM38+Mtj2kMKvbjjN2LOt2hhr
+# KR7laj3X3ZXtDDG7fyFrgGK1vIHizCFolmva7MQ3ZfRBQ9HP2tvtJD0WQBn3UauF
+# h+jQzqceCL5VKv5/RTbJUAEoYihkk9EonV5NHmeLmaZ+22ZbhtANc6eTzisE82py
+# 9MCLwfpb9O9dHXG7IjmldOunrIzC+Sg1KEmFZf2bQVD3E3h8q3ffcdR34og0KFyQ
+# oEbLckRKinH5f6uCF3dA8Dc9WHRdNZAyEj9hTcFsXDWL476Iup1yu/0xpWsVjgh+
+# 5A1u4GNvo0tsoiBCiXKT7Vx7OFburINvaJzBH1mWMVtyIV5qPlM/fcPOXsQma1Et
+# ORB3wZk8PtzNjFyyASBs+V2Pdsdr15q05ai5+a6SoYIDIDCCAxwGCSqGSIb3DQEJ
 # BjGCAw0wggMJAgEBMHcwYzELMAkGA1UEBhMCVVMxFzAVBgNVBAoTDkRpZ2lDZXJ0
 # LCBJbmMuMTswOQYDVQQDEzJEaWdpQ2VydCBUcnVzdGVkIEc0IFJTQTQwOTYgU0hB
 # MjU2IFRpbWVTdGFtcGluZyBDQQIQBUSv85SdCDmmv9s/X+VhFjANBglghkgBZQME
 # AgEFAKBpMBgGCSqGSIb3DQEJAzELBgkqhkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8X
-# DTIzMTAyNzEyNDg1OFowLwYJKoZIhvcNAQkEMSIEIDYv920G/7uhRJBqIjROBbVd
-# 6tA5AecEGqSQsXCX40aGMA0GCSqGSIb3DQEBAQUABIICAIflwjZEtuC8TCWOfRFs
-# sjFUVerXhTtDq5jmiZoYlCD4dkLYQYkv4PNDy/RauR7TOseqb0ouSGj8hpqs8nPp
-# E1KmbhHLt5x93te39pSkRaZhhwZHW1GJsxSuV3jk9Wlpuc60hY48DE7jRcE4xI+3
-# a43HBFNDE+TNpGi+u8pjRqIHUzRTNoSAYI6MvN/MwSSQoIHfhaC9K9kA+a9sTE5X
-# rupKIHdKdd1RxFeTLLbA/gx4Ewezk97fjiWY7yUG1cWpVU3tuv5O5nmSLMj7B/F6
-# As/2A6L6zPObrUOqbtNvttqLOiKM+OYTBgqeLsxQfW7HOpFSD2nixQWX01D7cp10
-# MF19fSrIKn3qE/XrPO00gAklMzKzgcioH5MsMZAkHu5qX16t7KgnYSakpSyPTyB9
-# Osl68SZrZfbIiU0Gs6GjtdrQEKIMvPeZgzBfG6L4TLXUmoOBljGaXueebWvw7QHT
-# +CeYyizu9ajOuRaK79/7KcQQo1x0VUbnOEfl7Ck88MXoujs2iMsTqROUkYpQfc96
-# bRCPXdIVl74GjX6zvQSJ1HVMgwjW9TbwC3zaLbEdPMJODyMQNvWwyxFccrR73Qpg
-# 5H+UShFDu1v+A+xt1oM2D2BgQKm62C6+cAvURKLqUZTub3MJF5hxDE8hdS2s0l44
-# A7kb8ZS4F++KWM5b/82E8yAI
+# DTIzMTAyNzEyNTEzM1owLwYJKoZIhvcNAQkEMSIEIIqc6EejTpreLbkpmRsqqcMq
+# 2zj1PZUUkQBlYSJ/AdCyMA0GCSqGSIb3DQEBAQUABIICACzPlU3HRMs+i3WYh8SE
+# RImMTf8xOp68PxK6URbIA+hFbX/0mdLj/FJg5+9JOmSXv4+ptcx1wNXtZ5bv9W9k
+# dNCy20Fyrscn76ipKLhhU1qgSuYjUfqIfhOinSBbEGAv0K2hoT1uDDahU+bwPVeR
+# YhJ2RqSfyOppkD5N5m+R4u1YVACBq0YDKPQ6IeoHbq+xUmceCvMtHvv6vyyzPjQh
+# IX4kqbBgv2Plp8DuDACXq5xt6i6nLTcogYnEAvO6NYuSK4ZCEDjf8N29X1aTbFby
+# yTJ/jR0WIuCxQyxFLUg1LLBgTzpyA7aEBNzK5OLA5OpyKZ0lyoJAaP8ldgvW9kE5
+# MJ4hl6E/JNT+iZf28GR7xHP6LZFd+GpdEU8es6L+lqsNW1uUcp9zASinEQcEUoPi
+# waMumkW40MqwGEJ57XKgzH+pONS3JOB2IDSLxezYxM+HdnGdT3FTBPeOltdXetpy
+# xqOWiVt4XrW1sk5wvrCs45U35kNWqEBDMR4PnFi8zjJwQt5enl3d7IdVopWP1lIF
+# RjT9RIDl4OsUuBMixjoglT3ol/27gu7ZgvZ5/HN4dqGLHrqqUcuVvZct0yjRBwj3
+# QnZkfKRnucBRLdZkzNzOCHeOjyVYkzZW7Zb9Bsp7wFxNUmd431jlvW+NZzC+Eu5o
+# uC7BCrbA/+PZLjBSrYg595g3
 # SIG # End signature block
