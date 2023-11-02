@@ -1,6 +1,6 @@
 # ConfigMgr and Intune Cleanup Scripts
 
-Scripts to help clean up duplicate updates published due to an issue March 2023
+Scripts to help clean up applications and updates published due to an issue on October 1, 2023. The issue was an old set of metadata being rereleased.
 
 ___
 
