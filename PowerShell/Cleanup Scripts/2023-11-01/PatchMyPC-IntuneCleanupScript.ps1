@@ -1,15 +1,19 @@
+#Requires -Modules MSAL.ps
+
 <#
 .SYNOPSIS
-    Clean Duplicate ConfigMgr Apps that may have been created due to an issue on October 2, 2023
+    Clean Duplicate Intune Apps and Updates that may have been created due to an issue on October 1, 2023
 .DESCRIPTION
-    Clean Duplicate ConfigMgr Apps that may have been created due to an issue on October 2, 2023
-.PARAMETER SiteCode
-    Specifies the ConfigMgr Site Code to connect to for clean up
-.PARAMETER ProviderMachineName
-    Specifies the Primary Site Server machine name of FQDN to connect to for clean up
+    Clean Duplicate Intune Apps and Updates that may have been created due to an issue on October 1, 2023
+.PARAMETER ClientId
+    Specifies the Client ID (Application (Client) ID) of the Intune App Registration used to connect to Intune
+.PARAMETER ClientSecret
+    Specifies the Client Secret of the Intune App Registration used to connect to Intune
+.PARAMETER TenantId
+    Specifies the Tenant ID (Directory (tenant) ID) of the Intune App Registration used to connect to Intune
 .EXAMPLE
-    PatchMyPC-IntuneCleanupScript.ps1 -SiteCode "CM1" -ProviderMachineName "Primary.CONTOSO.LOCAL"
-    Connects to ConfigMgr, Finds potential duplicate apps, prompts for their removal, and removes the duplicate ConfigMgr Apps after confirmation.
+    PatchMyPC-IntuneCleanupScript.ps1 -ClientId "GUID" -TenantId "GUID"
+    Authenticates against Graph, Finds potential duplicate apps, prompts for their removal, and removes the duplicate Intune Apps and Updates after confirmation.
 .NOTES
     ################# DISCLAIMER #################
     Patch My PC provides scripts, macro, and other code examples for illustration only, without warranty 
@@ -20,188 +24,255 @@
 #>
 
 [CmdletBinding()]
-param (
-	[Parameter(Mandatory)]
-	[String]
-	$SiteCode,
-	[Parameter(Mandatory)]
-	[String]
-	$ProviderMachineName
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$ClientId,
+
+    [Parameter(Mandatory = $true)]
+    [string]$ClientSecret,
+
+    [Parameter(Mandatory = $true)]
+    [string]$TenantId
 )
+
 #region config
 $updateIdsToClean = @(
-	'94cb6508-da2e-443e-84ca-99cb953b81d5',
-	'f4581441-2ac2-478e-b4d2-5d381005844b',
-	'8c8722b9-6c27-490a-ac8e-8687fa10b595',
-	'ddda82fb-5bed-4129-8766-6ba3fbd5b5eb',
-	'61034b70-cc96-4585-8e3c-07bfc63c1237',
-	'b1613c43-554b-44bd-88b6-c0275cbcbeb4',
-	'2c612f53-e8bc-4c9d-9245-8bbfc31197bc',
-	'176dc696-0648-44b1-94ce-f30eaa129447',
-	'59f4656c-99b1-4a9f-ba7c-4a266ae20869',
-	'19828a30-2161-4411-bd64-6980bd041251',
-	'b0311a4d-ff77-46f1-82a1-d6a30c8de1e1',
-	'703e9887-03e1-4849-91f0-1138ca5c83a6',
-	'e042976d-9e9c-41bf-8263-e33f86a980a6',
-	'd94ae903-ff6f-432a-9c53-7af6012039ac',
-	'fa08b747-c9ea-4b8f-8ec1-0884f45cc8ea',
-	'c0310cf6-6f5a-4a67-a2a7-204b5465b60f',
-	'4e60286c-a7ad-4bfa-b76b-235673f71869',
-	'18c73441-cd2f-4afe-bf5a-4368dbcdc9e5',
-	'd5ad9180-e20f-4d9b-957b-e1b619d2f1dd',
-	'641c0c63-6fee-4433-8d85-61c295b2df52',
-	'a5c70459-a873-46b6-813d-3ebd9e4b308e',
-	'0ed446a6-a56b-4d4f-b60c-c7f18738d690',
-	'db7664ca-b6d5-4a57-b5fb-ed07733ed1bf',
-	'cd931cd1-4280-479f-8bb9-2e1b9dea30b6',
-	'14b65ac2-715a-4e16-baf3-f8fa3103a0b2',
-	'e2f0f78e-569c-4684-9ab5-de1cca4aaf0e',
-	'dc2ef9c4-8381-42fc-9daf-cf2943df13e1',
-	'b8b775d0-e85b-4582-a18f-9b6a4f7259d2',
-	'369764e1-1c8d-4506-9a44-327dd7513a71',
-	'83372cb0-1d83-4f0c-8cb0-31fc12a16215',
-	'8e23d77c-d5ae-4919-9bbe-3acebcdcc36c',
-	'50249d3d-cc08-47f9-98ea-ae3be62b83d3',
-	'c2a1801f-f65f-43ee-b602-060101fdab0a',
-	'65be955d-0bef-4371-9f78-8de5eee79bbe',
-	'6d4f24c3-20d2-4efc-b1f7-e2f811e225b3',
-	'bac48cc1-27dd-4c3d-ae4e-993ec513b538',
-	'f9ac4063-218b-4df2-af31-d12dceb04e32',
-	'b8000e4c-4b68-44a7-9b07-c05708cfd8a9',
-	'd572b26a-cbf4-4154-bafd-64b3264331e3',
-	'1c53ebd3-66c0-411e-9510-6ea1eac5ab4b'
+    '94cb6508-da2e-443e-84ca-99cb953b81d5',
+    'f4581441-2ac2-478e-b4d2-5d381005844b',
+    '8c8722b9-6c27-490a-ac8e-8687fa10b595',
+    'ddda82fb-5bed-4129-8766-6ba3fbd5b5eb',
+    '61034b70-cc96-4585-8e3c-07bfc63c1237',
+    'b1613c43-554b-44bd-88b6-c0275cbcbeb4',
+    '2c612f53-e8bc-4c9d-9245-8bbfc31197bc',
+    '176dc696-0648-44b1-94ce-f30eaa129447',
+    '59f4656c-99b1-4a9f-ba7c-4a266ae20869',
+    '19828a30-2161-4411-bd64-6980bd041251',
+    'b0311a4d-ff77-46f1-82a1-d6a30c8de1e1',
+    '703e9887-03e1-4849-91f0-1138ca5c83a6',
+    'e042976d-9e9c-41bf-8263-e33f86a980a6',
+    'd94ae903-ff6f-432a-9c53-7af6012039ac',
+    'fa08b747-c9ea-4b8f-8ec1-0884f45cc8ea',
+    'c0310cf6-6f5a-4a67-a2a7-204b5465b60f',
+    '4e60286c-a7ad-4bfa-b76b-235673f71869',
+    '18c73441-cd2f-4afe-bf5a-4368dbcdc9e5',
+    'd5ad9180-e20f-4d9b-957b-e1b619d2f1dd',
+    '641c0c63-6fee-4433-8d85-61c295b2df52',
+    'a5c70459-a873-46b6-813d-3ebd9e4b308e',
+    '0ed446a6-a56b-4d4f-b60c-c7f18738d690',
+    'db7664ca-b6d5-4a57-b5fb-ed07733ed1bf',
+    'cd931cd1-4280-479f-8bb9-2e1b9dea30b6',
+    '14b65ac2-715a-4e16-baf3-f8fa3103a0b2',
+    'e2f0f78e-569c-4684-9ab5-de1cca4aaf0e',
+    'dc2ef9c4-8381-42fc-9daf-cf2943df13e1',
+    'b8b775d0-e85b-4582-a18f-9b6a4f7259d2',
+    '369764e1-1c8d-4506-9a44-327dd7513a71',
+    '83372cb0-1d83-4f0c-8cb0-31fc12a16215',
+    '8e23d77c-d5ae-4919-9bbe-3acebcdcc36c',
+    '50249d3d-cc08-47f9-98ea-ae3be62b83d3',
+    'c2a1801f-f65f-43ee-b602-060101fdab0a',
+    '65be955d-0bef-4371-9f78-8de5eee79bbe',
+    '6d4f24c3-20d2-4efc-b1f7-e2f811e225b3',
+    'bac48cc1-27dd-4c3d-ae4e-993ec513b538',
+    'f9ac4063-218b-4df2-af31-d12dceb04e32',
+    'b8000e4c-4b68-44a7-9b07-c05708cfd8a9',
+    'd572b26a-cbf4-4154-bafd-64b3264331e3',
+    '1c53ebd3-66c0-411e-9510-6ea1eac5ab4b'
 )
+
+$secret = ConvertTo-SecureString -String $ClientSecret -AsPlainText -Force
 #endregion
 
 #region functions
-function Set-ConfigMgrSiteDrive {
-	[OutputType([System.Void])]
-	param (
-		[Parameter(Mandatory)]
-		[String]
-		$SiteCode,
-		[Parameter(Mandatory)]
-		[String]
-		$ProviderMachineName
-	)
-	try {
-		# Import the ConfigurationManager.psd1 module 
-		if ($null -eq (Get-Module ConfigurationManager)) {
-			Import-Module "$($ENV:SMS_ADMIN_UI_PATH)\..\ConfigurationManager.psd1"
-		}
-
-		# Connect to the site's drive if it is not already present
-		if ($null -eq (Get-PSDrive -Name $SiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
-			New-PSDrive -Name $SiteCode -PSProvider CMSite -Root $ProviderMachineName
-		}
-
-		# Set the current location to be the site code.
-		Push-Location
-		Set-Location "$($SiteCode):\"
-	}
-	catch {
-		throw $_.Exception.Message
-	}
-	
-}
-
-function Get-ApplicationsToRemove {
-	[OutputType([System.Collections.Generic.List[PSCustomObject]])]
-	param (
-		[Parameter(Mandatory)]
-		[array]$UpdateIds
-	)
-	# Get the list of Applications in ConfigMgr
-	$configMgrApps = Get-CMApplication -Fast | Where-Object { $_.LocalizedDescription -like "Created by Patch My PC Version *" }
-	
-	$appsToRemove = [System.Collections.Generic.List[PSCustomObject]]::new()
-	foreach ($configMgrApp in $configMgrApps) {
-		try {
-			$appInfo = Get-CMDeploymentType -Application $configMgrApp
-			$appLocation = ([xml]$appInfo.SDMPackageXML).AppMgmtDigest.DeploymentType.Installer.Contents.Content.Location
-			if ((Split-Path $appLocation -Leaf) -in $UpdateIds) {
-				Write-Verbose "Found App $($configMgrApp.LocalizedDisplayName) to Remove"
-				$appsToRemove.Add($configMgrApp)
-			}
-		}
-		catch {
-			Write-Warning "Unable to get App Info for $($configMgrApp.LocalizedDisplayName) - $($_.Exception.Message)"
-		}
-	}
-	return $appsToRemove
-}
-
-function Remove-Applications {
-	[OutputType([System.Void])]
-	param (
-		[Parameter(Mandatory)]
-		[Array]$AppsToRemove
-	)
-	foreach ($appToRemove in $AppsToRemove) {
-		try {
-			if ($appToRemove.NumberOfDeployments -eq 0) {
-
-				$AppInfo = Get-CMDeploymentType -Application $appToRemove
-				$AppLocation = ([xml]$AppInfo.SDMPackageXML).AppMgmtDigest.DeploymentType.Installer.Contents.Content.Location
-				# Delete the application from ConfigMgr
-				$appToRemove | Remove-CMApplication -force
-				
-				# Delete the application content from the filesystem
-				$AppLocation = Resolve-Path Filesystem::$AppLocation
-				if (Test-Path $AppLocation -ErrorAction SilentlyContinue) {
-					Write-Host "Removing Content for $($appToRemove.LocalizedDisplayName) at $AppLocation" -ForegroundColor Cyan
-					Remove-Item $AppLocation -Recurse
-				}
-				else {
-					Write-Host "Unable to find content location $AppLocation skipping content location deletion" -ForegroundColor Red
-				}
-			}
-			else {
-				Write-Host "Skipping removal of $($appToRemove.LocalizedDisplayname) as it has deployments" -ForegroundColor Yellow
-			}
-		}
-		catch {
-			Write-Warning "Unable to remove $($appToRemove.LocalizedDisplayName) - $($_.Exception.Message)"
-		}
-	}
-}
-
 function Show-WelcomeScreen {
-	[OutputType([string])]
-	Param()
-	$welcomeScreen = "ICAgICAgICAgICAgX19fX19fICBfXyAgICBfXyAgIF9fX19fXyAgX19fX19fICAgIA0KICAgICAgICAgICAvXCAgPT0gXC9cICItLi8gIFwgL1wgID09IFwvXCAgX19fXCAgIA0KICAgICAgICAgICBcIFwgIF8tL1wgXCBcLS4vXCBcXCBcICBfLS9cIFwgXF9fX18gIA0KICAgICAgICAgICAgXCBcX1wgICBcIFxfXCBcIFxfXFwgXF9cICAgXCBcX19fX19cIA0KICAgICAgICAgICAgIFwvXy8gICAgXC9fLyAgXC9fLyBcL18vICAgIFwvX19fX18vIA0KIF9fX19fXyAgIF9fICAgICAgIF9fX19fXyAgIF9fX19fXyAgIF9fICAgX18gICBfXyAgX18gICBfX19fX18gIA0KL1wgIF9fX1wgL1wgXCAgICAgL1wgIF9fX1wgL1wgIF9fIFwgL1wgIi0uXCBcIC9cIFwvXCBcIC9cICA9PSBcIA0KXCBcIFxfX19fXCBcIFxfX19fXCBcICBfX1wgXCBcICBfXyBcXCBcIFwtLiAgXFwgXCBcX1wgXFwgXCAgXy0vIA0KIFwgXF9fX19fXFwgXF9fX19fXFwgXF9fX19fXFwgXF9cIFxfXFwgXF9cXCJcX1xcIFxfX19fX1xcIFxfXCAgIA0KICBcL19fX19fLyBcL19fX19fLyBcL19fX19fLyBcL18vXC9fLyBcL18vIFwvXy8gXC9fX19fXy8gXC9fLyAgIA0K"
-	Return $([system.text.encoding]::UTF8.GetString([system.convert]::FromBase64String($welcomeScreen)))
+    [OutputType([string])]
+    Param()
+    $welcomeScreen = "ICAgICAgICAgICAgX19fX19fICBfXyAgICBfXyAgIF9fX19fXyAgX19fX19fICAgIA0KICAgICAgICAgICAvXCAgPT0gXC9cICItLi8gIFwgL1wgID09IFwvXCAgX19fXCAgIA0KICAgICAgICAgICBcIFwgIF8tL1wgXCBcLS4vXCBcXCBcICBfLS9cIFwgXF9fX18gIA0KICAgICAgICAgICAgXCBcX1wgICBcIFxfXCBcIFxfXFwgXF9cICAgXCBcX19fX19cIA0KICAgICAgICAgICAgIFwvXy8gICAgXC9fLyAgXC9fLyBcL18vICAgIFwvX19fX18vIA0KIF9fX19fXyAgIF9fICAgICAgIF9fX19fXyAgIF9fX19fXyAgIF9fICAgX18gICBfXyAgX18gICBfX19fX18gIA0KL1wgIF9fX1wgL1wgXCAgICAgL1wgIF9fX1wgL1wgIF9fIFwgL1wgIi0uXCBcIC9cIFwvXCBcIC9cICA9PSBcIA0KXCBcIFxfX19fXCBcIFxfX19fXCBcICBfX1wgXCBcICBfXyBcXCBcIFwtLiAgXFwgXCBcX1wgXFwgXCAgXy0vIA0KIFwgXF9fX19fXFwgXF9fX19fXFwgXF9fX19fXFwgXF9cIFxfXFwgXF9cXCJcX1xcIFxfX19fX1xcIFxfXCAgIA0KICBcL19fX19fLyBcL19fX19fLyBcL19fX19fLyBcL18vXC9fLyBcL18vIFwvXy8gXC9fX19fXy8gXC9fLyAgIA0K"
+    Return $([system.text.encoding]::UTF8.GetString([system.convert]::FromBase64String($welcomeScreen)))
+}
+
+function Get-AuthToken {
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ClientId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TenantId
+    )
+    try {
+            $auth = Get-MsalToken -ClientId $ClientId -Tenant $TenantId -ClientSecret $secret
+        return $auth
+    }
+    catch {
+        throw $_.Exception.Message
+    }
+}
+
+function Get-AuthHeader {
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [PSCustomObject]$AuthToken
+    )
+    try {
+        $authHeader = @{
+            'Authorization' = $AuthToken.CreateAuthorizationHeader()
+        }
+        return $authHeader
+    }
+    catch {
+        throw $_.Exception.Message
+    }
+}
+
+function Get-IntuneApplicationsToRemove {
+    [OutputType([PSCustomObject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [PSCustomObject]$AuthToken,
+
+        [Parameter(Mandatory = $true)]
+        [Array]$UpdateIds
+    )
+    $graphApiVersion = 'beta'
+    $graphEndpoint = "deviceappmanagement/mobileapps?`$filter=isOf('microsoft.graph.win32LobApp')"
+    $uri = "https://graph.microsoft.com/$graphApiVersion/$($graphEndpoint)"
+    try {
+        # Page through all apps in the tenant..
+        $headers = Get-AuthHeader -AuthToken $AuthToken
+        $restParams = @{
+            Method      = 'Get'
+            Uri         = $uri
+            Headers     = $headers
+            ContentType = 'Application/Json'
+        }
+        $query = Invoke-RestMethod @restParams
+        $result = if ($query) {
+            while ($query.'@odata.nextLink') {
+                Write-Verbose "`n$($query.value.Count) objects returned from Graph"
+                $query.value
+                Write-Verbose "$($result.count) objects in result array"
+                $nextParams = @{
+                    Method      = 'Get'
+                    Uri         = $query.'@odata.nextLink'
+                    Headers     = $headers
+                    ContentType = 'Application/Json'
+                }
+                $query = Invoke-RestMethod @nextParams
+            }
+            $query.value
+            Write-Verbose "$($query.value.Count) objects returned from Graph"
+            Write-Verbose "$($result.count) objects in result array"
+        }
+        $apps = $result | Select-Object id, displayName, notes
+        # parse through the updateIds and select the apps we want to tear out.
+        $appsToRemove = $apps | Where-Object { $_.notes -match "PmpAppId:($($UpdateIds -join '|'))|PmpUpdateId:($($UpdateIds -join '|'))" }
+        return $appsToRemove
+    }
+    catch {
+        throw $_.Exception.Message
+    }
+}
+
+function Remove-IntuneApplications {
+    [OutputType([System.Void])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [PSCustomObject]$AuthToken,
+
+        [Parameter(Mandatory = $true)]
+        [String[]]$AppIdsToRemove
+    )
+    $graphApiVersion = 'beta'
+    $graphEndpoint = '$batch'
+    $uri = "https://graph.microsoft.com/$graphApiVersion/$($graphEndpoint)"
+    try {
+        $appIds = $AppIdsToRemove
+        $batchRequestBodies = New-GraphBatchRequests -AppIds $appIds
+
+        foreach ($batch in $batchRequestBodies) {
+            $headers = Get-AuthHeader -AuthToken $AuthToken
+            $headers.'ConsistencyLevel' = "eventual"
+            $requestParams = @{
+                Method      = 'POST'
+                Uri         = $uri
+                Body        = $($batch | ConvertTo-Json -Depth 20 )
+                headers     = $headers
+                ContentType = 'Application/Json'
+            }
+            $batchResponse = Invoke-RestMethod @requestParams
+            $batchResponse.responses | 
+            Select-Object id, status, body | 
+            ForEach-Object { Write-Verbose $($_ | ConvertTo-Json -Depth 20) }
+        }
+    }
+    catch {
+        throw $_.Exception.Message
+    }
+}
+
+function New-GraphBatchRequests {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [String[]]
+        $AppIds
+    )
+
+    $batchCount = 19
+    $start = 0
+    $end = $batchCount
+    if ($end -gt $AppIds.count) { $end = $AppIds.Count }
+    $batchBody = [System.Collections.Generic.List[PSCustomObject]]::new()
+    while ($end -le $AppIds.Count -and $start -le $appIds.Count) {
+        $list = [System.Collections.Generic.List[PSCustomObject]]::new()
+        $i = 1
+        Write-Verbose "Building batch $start - $end of $($AppIds.Count)"
+        ($start..$end) | ForEach-Object {
+            $list.Add([PSCustomObject]@{
+                    id     = $i
+                    method = "DELETE"
+                    url    = "/deviceAppManagement/mobileApps/$($AppIds[$_])"
+                })
+            $i++
+        }
+        $batchBody.Add([PSCustomObject]@{
+                requests = $list
+                headers  = "application/json"
+            })
+        $end = $end + $batchCount
+        if ($end -gt $AppIds.count) { $end = $AppIds.Count }
+        $start = $start + $batchCount
+    }
+    return $batchBody
 }
 #endregion
 
-#region Process
+#region process
 try {
-	Show-WelcomeScreen
-	Set-ConfigMgrSiteDrive -SiteCode $SiteCode -ProviderMachineName $ProviderMachineName
-	$appsToRemove = Get-ApplicationsToRemove -UpdateIds $updateIdsToClean
-	$appsToRemove | Select-Object LocalizedDisplayName, LocalizedDescription, DateCreated | Format-Table
-	if ($appsToRemove.Count -ge 1) {
-		$cleanupToggle = Read-Host "The following Apps will be removed, Continue [y/N]"
-		if ($cleanupToggle -eq "y") {
-			Remove-Applications -AppsToRemove $appsToRemove
-		}
-	}
-	else {
-		Write-Host "No applications detected for cleanup!" -ForegroundColor Green
-	}
+    Show-WelcomeScreen
+    $authToken = Get-AuthToken -ClientId $ClientId -TenantId $TenantId
+    $appsToRemove = Get-IntuneApplicationsToRemove -AuthToken $authToken -UpdateIds $updateIdsToClean
+    $appsToRemove | Format-Table
+    if ($appsToRemove.ImmediateBaseObject.Count -ge 1) {
+        $cleanupToggle = Read-Host "The following Apps will be removed, Continue [y/N]"
+        if ($cleanupToggle -eq "y") {
+            Remove-IntuneApplications -AuthToken $authToken -AppIdsToRemove $appsToRemove.id
+        }
+        else {
+            Write-Host "No applications detected for cleanup!" -ForegroundColor Green
+        }
+    }
 }
 catch {
-	Write-Warning $_.Exception.Message
-}
-finally {
-	Pop-Location
+    Write-Warning $_.Exception.Message
 }
 #endregion
 # SIG # Begin signature block
 # MIIovgYJKoZIhvcNAQcCoIIorzCCKKsCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDyDmkYAqcJyEr2
-# qiuPbpjCDTy+T7eRZ+IjcnUB++7dPKCCIcEwggWNMIIEdaADAgECAhAOmxiO+dAt
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAq+JCtpcN36FMi
+# fR/AX7fKuov6745k8Hh7u6Ov0dlShqCCIcEwggWNMIIEdaADAgECAhAOmxiO+dAt
 # 5+/bUOIIQBhaMA0GCSqGSIb3DQEBDAUAMGUxCzAJBgNVBAYTAlVTMRUwEwYDVQQK
 # EwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xJDAiBgNV
 # BAMTG0RpZ2lDZXJ0IEFzc3VyZWQgSUQgUm9vdCBDQTAeFw0yMjA4MDEwMDAwMDBa
@@ -386,34 +457,34 @@ finally {
 # ZXJ0IFRydXN0ZWQgRzQgQ29kZSBTaWduaW5nIFJTQTQwOTYgU0hBMzg0IDIwMjEg
 # Q0ExAhAPS6fbyKCtk6HZn7qYPz5NMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQB
 # gjcCAQwxCjAIoAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYK
-# KwYBBAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEICtiD9b1
-# ILptwfElBEv1C0h9xCmF/Wduoidkmy0F7W+nMA0GCSqGSIb3DQEBAQUABIICAMW7
-# 6GzssKNxwGFBopzsS+qztzHvuot/X635xnmAnzSEm3V9SK+hdlK4mfIgHcRad9k0
-# ZFQnHdHlUrxw/pBGTmnuC9rhY0hJxhT711oj+UFVYOV3qLfXRBAm0SuEtVxjIrDs
-# RRyjjurFF0NaLMw8019N8yQEMdGCq9JMpXX8/HSsIdHZLITkJtCMUyHPpL5PIsbP
-# j1REGA8fKesq3dW9fLU/vdaVBGQ6k83C/v9MvMYxXTp6jdaZXjtLfJ8MID8xHsiA
-# 5EAStmINpt43WgRep9LQEJ4dbmKEzGFW9maAUh9sOgBwaen5rBqfbywdnqkQkTQ5
-# S4zqTXagmVBTjOj8SUj1BD1buGgsVefjKFTR44A63EsI86WD+wDbrXhpYh3o1oJz
-# BUuP277eA0FOzB2EjkQYcr7BI4cmnBgR5z9+kfwu/cqJPtOT0XpMDn0L3+84Y8mX
-# 1xLTYPMeRshMKubsPGVL+a9aUq2bKc7AjuIPVfpR07FJ2K8NDg/0ElyNTlpzgAKg
-# mcFZj2URQn32Gdz8JjGK1FdBxo+3bGrytIcbnbelokG5kSgYY/9emDBH/PSl8qmW
-# 66bSkRRSVUk8KdC2riPBNjhhlxmhUkawUzATEDPI6RYMODaEPOkye/LGUPqS/oob
-# +FdaC0YldV9BlJj4FUqMqVnRUsz42bdi2INTZ3AzoYIDIDCCAxwGCSqGSIb3DQEJ
+# KwYBBAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIFLWQHX/
+# JqpBOaUfJzReJQSKyaIBDkMlHai5Znlc6YpMMA0GCSqGSIb3DQEBAQUABIICAHUg
+# Df8X9ZP5l4KxXAMpesRd/Xm0flzqEmd30qNE159xYEg6x1RXgZVv81sV3rJhJSHq
+# DfIIrsN8gLF7jUFrdwQLvGiqbgAz2sfaGXlfstYyW5b6s7YfcCQyKfVik3sOmdY/
+# eHqf+REU5HQ1y67xCZR+b9QwTvROXV3DPIsl8JlGrEg+wWucqmMazVjtb8sY3IKC
+# M2iu//B1pVjnv5M4EHM2+itr6fZS5VQth1Ext6Y/bETOvQirWSsHWEAlwA8ren+p
+# +6lm7JrvI4Rgqoir0/WdjglTAibVWaEA9V2JIqalnwPuYGnU9tG1FRLTLHW1b7YC
+# /UK372ponbAAXBUkGe4TqzRb6hm9y43mtfLttakYweJbx02H67XZnq0vTgeZSR2F
+# rqycoah7mYS6KK//SLdrj3Swu7VYQmQHWl5XSeddWjvoof79U6Y+2CuO81X6441u
+# lUKWbUW2gYhfBPxHQmYGpkzK/NUo+0eLkUA6FuOc8EJF0LhdVT5u64EFD2TW4m2u
+# qvarxzCG59do6QoQH04pAogZewa/CoveLadVVIGd4WfhexE7VzD8+vWWzRNj1hbf
+# YWpHyvgiblc4XLuowv8D7EqNZ6kyzbN2FMxGBRVxPWL+48kyi2ZbG609vimk70tM
+# SLCAvc2EVYabzePcxhxz4YoNPZBQRYd+418PK5GnoYIDIDCCAxwGCSqGSIb3DQEJ
 # BjGCAw0wggMJAgEBMHcwYzELMAkGA1UEBhMCVVMxFzAVBgNVBAoTDkRpZ2lDZXJ0
 # LCBJbmMuMTswOQYDVQQDEzJEaWdpQ2VydCBUcnVzdGVkIEc0IFJTQTQwOTYgU0hB
 # MjU2IFRpbWVTdGFtcGluZyBDQQIQBUSv85SdCDmmv9s/X+VhFjANBglghkgBZQME
 # AgEFAKBpMBgGCSqGSIb3DQEJAzELBgkqhkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8X
-# DTIzMTEwMjE4MDAzMVowLwYJKoZIhvcNAQkEMSIEIK9llve6XlitwH2Ne4zT/csY
-# cy1LXKlS14+bx6jfswcbMA0GCSqGSIb3DQEBAQUABIICAJzFfGC9uz3uKR+JoD0A
-# 6bQbze2MMHKEjpGHSq9H8B0MLha6v278h37lEeFJwtJVpJc8hgorxrpfWIUCvMD0
-# R+c80OhTSpx1lon5D7uqCRE9yHoQ8T7ITVLRbO1APFfyOkTLAv5fhHkhn8IuZLb3
-# QjiTcqNU67A4Shl7mqY32DOka2shjtzYkA8MsxTop79UQtzc59OEk442/z0coEXf
-# S3dOhnD6FpOY5mX17MIbQxvi4EAnA21vSow+ZU+YI01x7glb3YFDc0qcfmMcrs+7
-# FXlod9PX4Rx2VYX69NRh+lA0mRV0dpfxx1Rk1ETOoI05hnjkoArNbz6usdG/FSOD
-# qbb+Tfg2w5OldP5y4aRybDIIaiYZBzf8DZiDe/WSXAqTvZ7yx6XgUB9KOQzOJenh
-# RHGV8Kpkn1sgveUqwwsMs5Q1W/IvOOILXcMHxwGB2k38J9nVe47Msjay2OGDZ/9s
-# TiaSweoui7nKXPcWS9+t3USF+kySzJd6CLB/cTKI6IqwCCaDfnRYN5XDTV8KOb1e
-# 7tnptD2ZzeqxSqlv66Z61C/FqHNB67lSCcvHg8klIKTaiW6d8JM/UhNiUI5ydxuV
-# 8b6T99fXnVKUaCAjW6tmmyyLiksBq8G3PaegHYq3wEwaVubbXSQy/cfRdLczwWSS
-# 1WFH2sg/erNZHAwc1+b22bEx
+# DTIzMTEwMjE4MTQwNlowLwYJKoZIhvcNAQkEMSIEIB5TeCniEARXZr7efhJme0di
+# GJWKvu/b9iikzG+RtrK3MA0GCSqGSIb3DQEBAQUABIICADnA5hyc4GMTqAhyFRMB
+# BscrhsXwLIGQmVtHG24Q7O/8VJlGg1ZMWOA/x9DtsPqT2iTW9Zhc7Feeu7LNNEqu
+# KLE6ed6IkDDDDJZPGOYrosv+YjskZgxI3Yhkhuo4hL0gIts1aSgbuIBM9108IEbp
+# zj5IWcKKXP7dO4Ip2QIl5APkvG9ZfC+Q4Q/s+xJtFXC4AVt7IqznFvvFSRrXWyZW
+# Lc70mNzHYL3HMz+PNtHhZQ+FM1NC9MTW0u386YfuptULnw5oU64SYomNJHAKrHpU
+# Ee3Kop/XJRw5Jaldw/Tfm2F6tyam3nr5jKkOl/v3gTDjBpiORvSJhduWfFIFXWPF
+# 3RS2BsEipx6n0TMbmp2JTLbiTKSZ1/0LyCAmI8rONCtN4PfzxPQTmPQqoFMOEUek
+# 2BeWmu9zkqGJsiG0ARQhvRov04qyrsmZg0u08a8zBYKhGMBSL4gb310MqE0uO9MH
+# rgotwKGgoPh8mp2izEtmaAPNy3KWmFVrc/0lCehvcIcCwbfjewOwpKZQxPcZ7UP4
+# agT4HurgWW1EYxuD0JFWKPLfD2VJaSVjgzrvBUT4XbCMA5F+dXDEJjfc/CmzAtCP
+# oAs9lkXYe0rKCLgghlrABDVzJHaKdbjzWOybGxC8ezAIsdqT2Twj8xbzTdIkS3ev
+# 3rViAry420tOipJhAnaAF0/J
 # SIG # End signature block
