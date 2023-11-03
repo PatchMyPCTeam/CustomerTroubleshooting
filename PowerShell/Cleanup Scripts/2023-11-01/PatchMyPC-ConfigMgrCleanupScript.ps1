@@ -8,7 +8,7 @@
 .PARAMETER ProviderMachineName
     Specifies the Primary Site Server machine name of FQDN to connect to for clean up
 .EXAMPLE
-    PatchMyPC-IntuneCleanupScript.ps1 -SiteCode "CM1" -ProviderMachineName "Primary.CONTOSO.LOCAL"
+    PatchMyPC-ConfigMgrCleanupScript.ps1 -SiteCode "CM1" -ProviderMachineName "Primary.CONTOSO.LOCAL"
     Connects to ConfigMgr, Finds potential duplicate apps, prompts for their removal, and removes the duplicate ConfigMgr Apps after confirmation.
 .NOTES
     ################# DISCLAIMER #################
@@ -109,25 +109,35 @@ function Get-ApplicationsToRemove {
 	[OutputType([System.Collections.Generic.List[PSCustomObject]])]
 	param (
 		[Parameter(Mandatory)]
+		[String]$SiteCode,
+
+		[Parameter(Mandatory)]
+		[String]$ProviderMachineName,
+	
+		[Parameter(Mandatory)]
 		[array]$UpdateIds
 	)
-	# Get the list of Applications in ConfigMgr
-	$configMgrApps = Get-CMApplication -Fast | Where-Object { $_.LocalizedDescription -like "Created by Patch My PC Version *" }
-	
-	$appsToRemove = [System.Collections.Generic.List[PSCustomObject]]::new()
-	foreach ($configMgrApp in $configMgrApps) {
-		try {
-			$appInfo = Get-CMDeploymentType -Application $configMgrApp
-			$appLocation = ([xml]$appInfo.SDMPackageXML).AppMgmtDigest.DeploymentType.Installer.Contents.Content.Location
-			if (-not [String]::IsNullOrWhitespace($appLocation) -and (Split-Path $appLocation -Leaf) -in $UpdateIds) {				
-				Write-Verbose "Found App $($configMgrApp.LocalizedDisplayName) to Remove"
-				$appsToRemove.Add($configMgrApp)
+
+	$CommonParams = @{
+		ComputerName = $ProviderMachineName
+		Namespace	 = 'root\SMS\site_{0}' -f $SiteCode
+		ErrorAction  = 'Stop'
+	}
+
+	$appsToRemove = foreach ($UpdateId in $UpdateIds) {
+		$Query      = "SELECT ContentSource, ContentUniqueID FROM SMS_Content WHERE ContentSource LIKE '%{0}%'" -f $UpdateId
+		$SMSContent = Get-CimInstance -Query $Query @CommonParams
+
+		if (-not [String]::IsNullOrWhiteSpace($SMSContent)) {
+			$Query 			= "SELECT AppModelName, ContentId FROM SMS_DeploymentType WHERE ContentId = '{0}'" -f $SMSContent.ContentUniqueID
+			$DeploymentType = Get-CimInstance -Query $Query @CommonParams
+			
+			if (-not [String]::IsNullOrWhiteSpace($DeploymentType)) {
+				Get-CMApplication -ModelName $DeploymentType.AppModelName -Fast -ErrorAction 'Stop'
 			}
 		}
-		catch {
-			Write-Warning "Unable to get App Info for $($configMgrApp.LocalizedDisplayName) - $($_.Exception.Message)"
-		}
 	}
+	
 	return $appsToRemove
 }
 
@@ -178,7 +188,7 @@ function Show-WelcomeScreen {
 try {
 	Show-WelcomeScreen
 	Set-ConfigMgrSiteDrive -SiteCode $SiteCode -ProviderMachineName $ProviderMachineName
-	$appsToRemove = Get-ApplicationsToRemove -UpdateIds $updateIdsToClean
+	$appsToRemove = Get-ApplicationsToRemove -UpdateIds $updateIdsToClean -SiteCode $SiteCode -ProviderMachineName $ProviderMachineName
 	$appsToRemove | Select-Object LocalizedDisplayName, LocalizedDescription, DateCreated | Format-Table
 	if ($appsToRemove.Count -ge 1) {
 		$cleanupToggle = Read-Host "The following Apps will be removed, Continue [y/N]"
@@ -196,12 +206,13 @@ catch {
 finally {
 	Pop-Location
 }
+#endregion
 
 # SIG # Begin signature block
 # MIIovgYJKoZIhvcNAQcCoIIorzCCKKsCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCRfHfoEuIVEKC1
-# MBNYORFS7vaBN2Y6JVeJc0f+PCYyVKCCIcEwggWNMIIEdaADAgECAhAOmxiO+dAt
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBXj+UpfiUstCIr
+# NkMaNOra9Ac9lbKXzhuYKE4e9/wC/aCCIcEwggWNMIIEdaADAgECAhAOmxiO+dAt
 # 5+/bUOIIQBhaMA0GCSqGSIb3DQEBDAUAMGUxCzAJBgNVBAYTAlVTMRUwEwYDVQQK
 # EwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xJDAiBgNV
 # BAMTG0RpZ2lDZXJ0IEFzc3VyZWQgSUQgUm9vdCBDQTAeFw0yMjA4MDEwMDAwMDBa
@@ -386,34 +397,34 @@ finally {
 # ZXJ0IFRydXN0ZWQgRzQgQ29kZSBTaWduaW5nIFJTQTQwOTYgU0hBMzg0IDIwMjEg
 # Q0ExAhAPS6fbyKCtk6HZn7qYPz5NMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQB
 # gjcCAQwxCjAIoAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYK
-# KwYBBAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIH6u5v2G
-# GKsN35WYEwpkOrjfMkGvtw5LXZdAtuhwqI0yMA0GCSqGSIb3DQEBAQUABIICAMdk
-# 3rzWcJxo7SrlCyedk8XCV5vDe55lW9rbJWkMZMHny0I9+k+sMSvrFjzVeZ1zdEfJ
-# OX8oTEplhkj+uLt1iVwNOy80b9XFXsQq3UkgTw6q5Kmux+h/arztWS5g0/X7pB4O
-# rlq9V8Zz+w7ZsZDOK2sLQQBcwyx9UnhOg0w60anaH3Jtcm4vxXl5XCU/z0xSmchb
-# DuGrYDqg36ezcMXGr4GlOEh5mZz7G/YoNZFu+e8pt85lVQ/bpuNmRv6WOyan7fMg
-# KM74NZTZMai7bmy+J/1gvyQqwEW+z7bS9V8q0bStKyQtlJlKXVfkMom5qncUmm2B
-# UMul5c+zex/5pKj6yFXO42o3JeNJXbn1zt7IbllW0n22B545WKBZrUNNmmNl2Ox0
-# us4j4ITbIu6bVDceJWUIvg9hpgEpuNQnJb/QST0XP+HR5Li/H274BNes5UMwohGf
-# aSOdYNcGTOsuzdDh7B7OL5RLwVIVPP8nJRhlTLmYHSB1y6DpdkWbPgYxA1A6Fd+H
-# rh8JQj880EctNTD7hYv0UFxJhJXzVRJ0cCddx8TFADvrbCZmK0Qz1Pexfx5kiuHB
-# D/yBD/HWM1UyjbFx9Xb/SBCXXLdTthEy0LEywfeOeQICkWa0n5Be6mgHFFmCXEmI
-# m/m+ur1OZ43yJGHjwcAI6/OX3kHHpr8vj8oci+w2oYIDIDCCAxwGCSqGSIb3DQEJ
+# KwYBBAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIKSP7EGj
+# 9N/jggfIn9aes0Rd82rDChQX3adCEUs4PtbtMA0GCSqGSIb3DQEBAQUABIICAOfV
+# SosrniGRueOd0niYrnBEpAI5IVlKwEUblV5JucuSObtFyMsdfEwv+CO36UfNKtnm
+# tOdZW3icMuwETIAIJFFSPBAjIG+xrXbPCYBVtBYlLjS+F3LjzH2ZBfoJPUhe55IT
+# iznt0H1efkjyvrfjAE5YfejsuD7Xe/Nz3V98SWoVSWIxXCdClB8jj9umdnMDVtQR
+# J2/9Rmer81z0xpGoyz21Qr/UavhExEwuzhA4prWfTk+slv/qUSeiOPaF2OaN9tFm
+# xcjRl234J4KL7M1dwHHA5ZYF3JhAoIKt7cFFxU/X1RBL4BwPCPAyCpB6WzJA38+p
+# h6d0cTHRaVxHa/jTceoCSt8EXkmp+oSD0PZ9xIMAfDxHhz+OG0lPV8KWzC1hlUfx
+# iNDo4UKmb9aHODAoYLzV+WgYk/XZu+pdkJBQ3kjT11JdH1ix+GPx1xdizi+fhnRM
+# J6pIeCUk/qslZ7dQ8R3wVfpLYc40N6PuiY0rF104LlulkXNTc8gM+DheIpUkPkY1
+# JFml6vWjQF5DqX9WCK+yZKG42KIfftxJ2nZf+nTohkCIordWqNXPFBTuUOQQWwKs
+# vh69AGYTARlnIPGn4GiKYyAUuQY2TN1SUwovy11zVjWdp2ERNpK5PKh8ohrfwu61
+# aHBBThN5jo25+EJP3APYUK72ZDqHFQbnKcu60povoYIDIDCCAxwGCSqGSIb3DQEJ
 # BjGCAw0wggMJAgEBMHcwYzELMAkGA1UEBhMCVVMxFzAVBgNVBAoTDkRpZ2lDZXJ0
 # LCBJbmMuMTswOQYDVQQDEzJEaWdpQ2VydCBUcnVzdGVkIEc0IFJTQTQwOTYgU0hB
 # MjU2IFRpbWVTdGFtcGluZyBDQQIQBUSv85SdCDmmv9s/X+VhFjANBglghkgBZQME
 # AgEFAKBpMBgGCSqGSIb3DQEJAzELBgkqhkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8X
-# DTIzMTEwMzEyMzM0N1owLwYJKoZIhvcNAQkEMSIEIIdrNzeFfyyfQOkwncpyTn7t
-# pMskm3IwpX14ZHMd0bkXMA0GCSqGSIb3DQEBAQUABIICAC3NYkEtmgEREEwv7Wzq
-# T1U2lC1ummeuXHzvF3cLDLNvLZl7+WQ/ndzyFqqhdCdSwe/FVPGh+6DDJ+9B3/8a
-# J9MnrunISfIucIjGSEn5VUo/rE5bgtOmYqGWhLMZ9CJl8tn582IGtbdVxf144rcy
-# 7B1wiSMxY57NWCbkzm0eYvf45eNxllTgCWTBI5a+00zMDmw4ziRGD0wSBkEaWgWO
-# /8cAFcwKBdRZkm/XrtGV9s8W95ckoAlz5u0F9hgGRNTIniHDIczsp3NFP4dSV+CX
-# Fw8zF6aYVQVfvdtr/wx+XPem+kfEPSG6wXBNTp51cn2EqrRreXKOgTDGftW/a6Bu
-# gXr6omqLFZy3Z4JtwcrGd/BNKSNQvQl5/MbMqE/MuMkfFA77yOWHPKEfOZj4JYRy
-# hsSCnQeJ7huIdAD39qzfsLSLRF7QGp4Ac98yd/LcrEbX1JmYJ7VPxyByot6ZB+NR
-# LkuEUJMNhbdGYgEkRgT7axxXXhOcuyYleYvFMwnbDZW9Etu7WjjsxfIPl2jSfPtp
-# E553B38cf/t52BSU2MNvtG9u4aSo2uu5z7Tb1edkD7tT3ykFoXbSyWE7BOtLMKCO
-# KdNWXMl2FDYLsG2X4xomS0fWS07zdVsLslvcb2NfaQfF88D1di0aMvMKBPTj0fHg
-# Qjl78D8b1B5nHVZyT5CF4lBT
+# DTIzMTEwMzE0MTIzNFowLwYJKoZIhvcNAQkEMSIEIM6pIURBKWk8Z8W7u0gA+SzH
+# ygxmLJI0Mmhe/9RaYncrMA0GCSqGSIb3DQEBAQUABIICABKKOy+buDke8I02iyYy
+# 53DftuRRSIiogD139CzXR3nEM2pXPvQTam4enGKbuPbBUrvbATXH83D4lGwEXE9L
+# +I7Bi2eW4pIol0qkUEIC7/MgXky/alm1e2yFntOvUyttEVIytYgRLpqYSqDjRSNn
+# d1tV5gLkWBAu5gg4GugW7nca0aDmAJwcTtiNvvTN0En9uRc0SUifIS3rn4MCZxo6
+# cH2GlrkiR20BHeukhkt736B24wOZEMm1hm0oEXOlKomXC42iSAJUd361kQstKAPm
+# M2nYS9fA3zQfQr41EzXyn9x2j7KDQwCevJ3VqmIOEBipukzY+BmTWLhDeU8Ah0DU
+# 9qMDjWCq8kBhRJ+ajBuLt0HZYG9DDj9+1EZLFZskADct7kFv+Q4+n3mr8S2Ds8f8
+# dDko0rtvCi7C2iqun8vrTTWULy/0DNvQ/+zkH7lzSeqP1b/fP38LAOlKiJwIdrSt
+# Qe0X1Pkr5zfi3zWuVxZiOhS4tY9veiPlx3kz0fVqTWd4PNAl5fiGkceMEKxYo0dI
+# npvyD879dOUX5AGd+U9YZr9/7EbbK+HixsbkaSGPvVC4vynf1FbrowtSEzTv9yRh
+# vmfhn6ZnJzNP9sF0Vs1Z7IH6phNVPLvjxK3YAGpeooOTv3EO6/c3RpYvHas8S6tT
+# ykBXl8UhwV0frfQ8Lm4wJkyk
 # SIG # End signature block
