@@ -8,7 +8,7 @@
 .PARAMETER ProviderMachineName
     Specifies the Primary Site Server machine name of FQDN to connect to for clean up
 .EXAMPLE
-    PatchMyPC-IntuneCleanupScript.ps1 -SiteCode "CM1" -ProviderMachineName "Primary.CONTOSO.LOCAL"
+    PatchMyPC-ConfigMgrCleanupScript.ps1 -SiteCode "CM1" -ProviderMachineName "Primary.CONTOSO.LOCAL"
     Connects to ConfigMgr, Finds potential duplicate apps, prompts for their removal, and removes the duplicate ConfigMgr Apps after confirmation.
 .NOTES
     ################# DISCLAIMER #################
