@@ -2,6 +2,8 @@
 
 Scripts to help clean up applications and updates published due to an issue on November 1, 2023. The issue was an old set of metadata being rereleased.
 
+NOTE: These scripts will remove specific, targeted Patch My PC Published applications and their deployments! ConfigMgr Application deployments will not automatically be recreated when the Patch My PC Publisher syncs. For Intune App and Update assignments, only those defined via right-click options will be recreated when the app/updates are recreated, manual assignments will be lost.
+
 ___
 
 The information contained in this online site is presented for general educational and information purposes only. The information contained in this site should not be considered exhaustive and the user should seek the advice of appropriate professionals.
