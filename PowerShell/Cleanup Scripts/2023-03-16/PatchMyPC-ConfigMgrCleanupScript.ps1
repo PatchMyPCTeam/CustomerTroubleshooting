@@ -756,7 +756,7 @@ try {
 	$appsToRemove | Select-Object LocalizedDisplayName, LocalizedDescription, DateCreated | Format-Table
 	if ($appsToRemove.Count -ge 1) {
 
-        $TSDeploymentsCheck = Get-AppTSandDeploymentsInfo
+        $TSDeploymentsCheck = Get-AppTSandDeploymentsInfo -appsToRemove $appsToRemove
 
         if ($TSDeploymentsCheck.AppTSandDeploymentsInfoResult) {
             # There are active deployments or task sequence references
