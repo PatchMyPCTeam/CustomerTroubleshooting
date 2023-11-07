@@ -1,14 +1,14 @@
 <#
 .SYNOPSIS
-    Clean Duplicate ConfigMgr Apps that may have been created due to an issue on March 16, 2023
+    Clean Duplicate ConfigMgr Apps that may have been created due to an issue on November 1, 2023
 .DESCRIPTION
-    Clean Duplicate ConfigMgr Apps that may have been created due to an issue on March 16, 2023
+    Clean Duplicate ConfigMgr Apps that may have been created due to an issue on November 1, 2023
 .PARAMETER SiteCode
     Specifies the ConfigMgr Site Code to connect to for clean up
 .PARAMETER ProviderMachineName
     Specifies the Primary Site Server machine name of FQDN to connect to for clean up
 .EXAMPLE
-    PatchMyPC-IntuneCleanupScript.ps1 -SiteCode "CM1" -ProviderMachineName "Primary.CONTOSO.LOCAL"
+    PatchMyPC-ConfigMgrCleanupScript.ps1 -SiteCode "CM1" -ProviderMachineName "Primary.CONTOSO.LOCAL"
     Connects to ConfigMgr, Finds potential duplicate apps, prompts for their removal, and removes the duplicate ConfigMgr Apps after confirmation.
 .NOTES
     ################# DISCLAIMER #################
@@ -617,15 +617,15 @@ function Remove-Applications {
 		[Parameter(Mandatory)]
 		[Array]$AppsToRemove
 	)
-	try {
-		foreach ($appToRemove in $AppsToRemove) {
+	foreach ($appToRemove in $AppsToRemove) {
+		try {
 			if ($appToRemove.NumberOfDeployments -eq 0) {
 
 				$AppInfo = Get-CMDeploymentType -Application $appToRemove
 				$AppLocation = ([xml]$AppInfo.SDMPackageXML).AppMgmtDigest.DeploymentType.Installer.Contents.Content.Location
 				# Delete the application from ConfigMgr
 				$appToRemove | Remove-CMApplication -force
-			
+				
 				# Delete the application content from the filesystem
 				$AppLocation = Resolve-Path Filesystem::$AppLocation
 				if (Test-Path $AppLocation -ErrorAction SilentlyContinue) {
@@ -640,10 +640,95 @@ function Remove-Applications {
 				Write-Host "Skipping removal of $($appToRemove.LocalizedDisplayname) as it has deployments" -ForegroundColor Yellow
 			}
 		}
+		catch {
+			Write-Warning "Unable to remove $($appToRemove.LocalizedDisplayName) - $($_.Exception.Message)"
+		}
 	}
-	catch {
-		throw $_.Exception.Message
-	}
+}
+
+function Get-AppTSandDeploymentsInfo {
+	[OutputType([System.Collections.ArrayList])]
+	param(
+		[Parameter(Mandatory)]
+		# IResultObject#SMS_Application
+		[PSObject[]]$appsToRemove
+	)
+
+    ## Get all task sequences
+    $TaskSequenceNames = (Get-CMTaskSequence -Fast).Name
+
+    foreach ($appToRemove in $appsToRemove) {
+    
+        $localizedDisplayName = $appToRemove.LocalizedDisplayName
+        $applicationCI_UniqueID = $appToRemove.CI_UniqueID
+        ## need to remove the revision number in the CI_UniqueID as the TS is not going to reference the app Revision number
+        $lastSlashIndex = $applicationCI_UniqueID.LastIndexOf('/')
+        $applicationCI_UniqueID = $applicationCI_UniqueID.Substring(0, $lastSlashIndex)
+
+        ###############################################
+        ## Check if the app has active deployments
+        ###############################################
+        $deployments = Get-CMApplicationDeployment -Name $localizedDisplayName | Select-Object ApplicationName, CollectionName
+        if ($null -ne $deployments)	{
+            $activeDeployments = foreach ($deployment in $deployments) {
+                [PSCustomObject]@{
+                    ApplicationName = $deployment.ApplicationName
+                    Collection      = $deployment.CollectionName        
+                }
+            }
+        }
+
+        ########################################################
+        ## Check if the app is referenced in a Task Sequence
+        ########################################################
+        [array]$tsInfo = foreach ($taskSequenceName in $TaskSequenceNames) {
+            # Check if the application CI_UniqueID is referenced in the task sequence
+            [array]$references = (Get-CMTaskSequence -WarningAction SilentlyContinue | Where-Object { $_.Name -eq $taskSequenceName }).References.Package
+            if ($null -ne $references) {            
+                foreach ($reference in $references) {
+                    if ($reference -eq $applicationCI_UniqueID) {
+                        [array]$steps = Get-CMTaskSequenceStep -TaskSequenceName $taskSequenceName | Where-Object { $_.SmsProviderObjectPath -eq "SMS_TaskSequence_InstallApplicationAction" }
+                        foreach ($step in $steps) {
+                            if ($step.ApplicationName -like "*$applicationCI_UniqueID*") {
+                                #Write-Host ("Task Sequence Name: {0}." -f $taskSequenceName) -BackgroundColor Red
+                                #Write-Host ("Step Name: {0}" -f $step.Name)
+                                #Write-Host "Please remove the application from the Task Sequence first, before deleting it. You will have to re-add it to the TS after the app is recreated"
+                                [PSCustomObject]@{
+                                    TaskSequenceName = $taskSequenceName
+                                    TaskSequenceStep = $step.Name
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #######################################################################
+        ## Check if the app has any deployments or is referenced in any TS
+        #######################################################################
+        if ($activeDeployments.Count -gt 0){
+            #Write-host ("The application {0} has the following active deployments. Please delete them first and re-run this script." -f $localizedDisplayName) -BackgroundColor Red
+            #$activeDeployments | Format-Table -AutoSize
+            $hasActiveDeployments = $true
+        }
+        if ($tsInfo.Count -gt 0){
+            #Write-host ("The application {0} is referenced in the following task sequences. Please remove these first and re-run this script." -f $localizedDisplayName) -BackgroundColor Red
+            #$tsInfo | Format-Table -AutoSize
+            $hasTaskSequenceReferences = $true
+        }
+    }
+
+    # Check if either $hasActiveDeployments or $hasTaskSequenceReferences is true
+    $result = $hasActiveDeployments -or $hasTaskSequenceReferences
+    #return $AppTSandDeploymentsInfoResult
+    # Return results
+    [PSCustomObject]@{
+        AppTSandDeploymentsInfoResult = $result
+        ActiveDeployments = $activeDeployments
+        TSInfo = $tsInfo
+        ApplicationName = $localizedDisplayName
+    }
 }
 
 function Show-WelcomeScreen {
@@ -657,14 +742,45 @@ function Show-WelcomeScreen {
 #region Process
 try {
 	Show-WelcomeScreen
+
+	Write-Host "`n########## IMPORTANT ##########" -ForegroundColor Cyan
+	Write-Host "`nWarning: Applications that require cleanup, that are deployed, will not be deleted by this script.`nAction: Please document and delete existing deployments for affected applications before continuing." -ForegroundColor Yellow
+	Write-Host "`nWarning: Applications that require cleanup, that are referenced by a Task Sequence, will not be deleted by this script.`nAction: Please document existing Task Sequences before removing the application from the Task Sequence step and continuing." -ForegroundColor Yellow
+	Write-Host "`nWarning: After following the advice above, and before agreeing to delete the following applications, please be mindful that Patch My PC Publisher will not re-create deployments or add applications back to Task Sequence steps." -ForegroundColor Yellow
+	Write-Host "Action: Ensure existing application deployments and Task Sequence reference have been recorded before continuing." -ForegroundColor Yellow
+	Write-Host "`n###############################" -ForegroundColor Cyan
+
+
 	Set-ConfigMgrSiteDrive -SiteCode $SiteCode -ProviderMachineName $ProviderMachineName
 	$appsToRemove = Get-ApplicationsToRemove -UpdateIds $updateIdsToClean -SiteCode $SiteCode -ProviderMachineName $ProviderMachineName
 	$appsToRemove | Select-Object LocalizedDisplayName, LocalizedDescription, DateCreated | Format-Table
-	if ($appsToRemove.Count -ge 1){
-		$cleanupToggle = Read-Host "The following Apps will be removed, Continue [y/N]"
-		if ($cleanupToggle -eq "y") {
-			Remove-Applications -AppsToRemove $appsToRemove
-		}
+	if ($appsToRemove.Count -ge 1) {
+
+        $TSDeploymentsCheck = Get-AppTSandDeploymentsInfo
+
+        if ($TSDeploymentsCheck.AppTSandDeploymentsInfoResult) {
+            # There are active deployments or task sequence references
+            $activeDeployments = $TSDeploymentsCheck.ActiveDeployments
+            $tsInfo = $TSDeploymentsCheck.TSInfo
+            $localizedDisplayName = $TSDeploymentsCheck.ApplicationName
+
+            if ($activeDeployments.Count -gt 0) {
+                Write-host ("The application {0} has the following active deployments. Please delete them first and re-run this script." -f $localizedDisplayName) -BackgroundColor Red
+                $activeDeployments | Format-Table -AutoSize
+            }
+
+            if ($tsInfo.Count -gt 0) {
+                Write-host ("The application {0} is referenced in the following task sequences. Please remove these first and re-run this script." -f $localizedDisplayName) -BackgroundColor Red
+                $tsInfo | Format-Table -AutoSize
+            }
+    
+        } else {
+            # No active deployments or task sequence references
+            $cleanupToggle = Read-Host "The following Apps will be removed, Continue [y/N]"
+		    if ($cleanupToggle -eq "y") {
+			    Remove-Applications -AppsToRemove $appsToRemove
+		    }
+        }
 	}
 	else {
 		Write-Host "No applications detected for cleanup!" -ForegroundColor Green
@@ -676,4 +792,3 @@ catch {
 finally {
 	Pop-Location
 }
-#endregion
