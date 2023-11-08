@@ -176,6 +176,91 @@ function Remove-Applications {
 	}
 }
 
+function Get-AppTSandDeploymentsInfo {
+	[OutputType([System.Collections.ArrayList])]
+	param(
+		[Parameter(Mandatory)]
+		# IResultObject#SMS_Application
+		[PSObject[]]$appsToRemove
+	)
+
+    ## Get all task sequences
+    $TaskSequenceNames = (Get-CMTaskSequence -Fast).Name
+
+    foreach ($appToRemove in $appsToRemove) {
+    
+        $localizedDisplayName = $appToRemove.LocalizedDisplayName
+        $applicationCI_UniqueID = $appToRemove.CI_UniqueID
+        ## need to remove the revision number in the CI_UniqueID as the TS is not going to reference the app Revision number
+        $lastSlashIndex = $applicationCI_UniqueID.LastIndexOf('/')
+        $applicationCI_UniqueID = $applicationCI_UniqueID.Substring(0, $lastSlashIndex)
+
+        ###############################################
+        ## Check if the app has active deployments
+        ###############################################
+        $deployments = Get-CMApplicationDeployment -Name $localizedDisplayName | Select-Object ApplicationName, CollectionName
+        if ($null -ne $deployments)	{
+            $activeDeployments = foreach ($deployment in $deployments) {
+                [PSCustomObject]@{
+                    ApplicationName = $deployment.ApplicationName
+                    Collection      = $deployment.CollectionName        
+                }
+            }
+        }
+
+        ########################################################
+        ## Check if the app is referenced in a Task Sequence
+        ########################################################
+        [array]$tsInfo = foreach ($taskSequenceName in $TaskSequenceNames) {
+            # Check if the application CI_UniqueID is referenced in the task sequence
+            [array]$references = (Get-CMTaskSequence -WarningAction SilentlyContinue | Where-Object { $_.Name -eq $taskSequenceName }).References.Package
+            if ($null -ne $references) {            
+                foreach ($reference in $references) {
+                    if ($reference -eq $applicationCI_UniqueID) {
+                        [array]$steps = Get-CMTaskSequenceStep -TaskSequenceName $taskSequenceName | Where-Object { $_.SmsProviderObjectPath -eq "SMS_TaskSequence_InstallApplicationAction" }
+                        foreach ($step in $steps) {
+                            if ($step.ApplicationName -like "*$applicationCI_UniqueID*") {
+                                #Write-Host ("Task Sequence Name: {0}." -f $taskSequenceName) -BackgroundColor Red
+                                #Write-Host ("Step Name: {0}" -f $step.Name)
+                                #Write-Host "Please remove the application from the Task Sequence first, before deleting it. You will have to re-add it to the TS after the app is recreated"
+                                [PSCustomObject]@{
+                                    TaskSequenceName = $taskSequenceName
+                                    TaskSequenceStep = $step.Name
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #######################################################################
+        ## Check if the app has any deployments or is referenced in any TS
+        #######################################################################
+        if ($activeDeployments.Count -gt 0){
+            #Write-host ("The application {0} has the following active deployments. Please delete them first and re-run this script." -f $localizedDisplayName) -BackgroundColor Red
+            #$activeDeployments | Format-Table -AutoSize
+            $hasActiveDeployments = $true
+        }
+        if ($tsInfo.Count -gt 0){
+            #Write-host ("The application {0} is referenced in the following task sequences. Please remove these first and re-run this script." -f $localizedDisplayName) -BackgroundColor Red
+            #$tsInfo | Format-Table -AutoSize
+            $hasTaskSequenceReferences = $true
+        }
+    }
+
+    # Check if either $hasActiveDeployments or $hasTaskSequenceReferences is true
+    $result = $hasActiveDeployments -or $hasTaskSequenceReferences
+    #return $AppTSandDeploymentsInfoResult
+    # Return results
+    [PSCustomObject]@{
+        AppTSandDeploymentsInfoResult = $result
+        ActiveDeployments = $activeDeployments
+        TSInfo = $tsInfo
+        ApplicationName = $localizedDisplayName
+    }
+}
+
 function Show-WelcomeScreen {
 	[OutputType([string])]
 	Param()
@@ -200,10 +285,32 @@ try {
 	$appsToRemove = Get-ApplicationsToRemove -UpdateIds $updateIdsToClean -SiteCode $SiteCode -ProviderMachineName $ProviderMachineName
 	$appsToRemove | Select-Object LocalizedDisplayName, LocalizedDescription, DateCreated | Format-Table
 	if ($appsToRemove.Count -ge 1) {
-		$cleanupToggle = Read-Host "The following Apps will be removed, Continue [y/N]"
-		if ($cleanupToggle -eq "y") {
-			Remove-Applications -AppsToRemove $appsToRemove
-		}
+
+        $TSDeploymentsCheck = Get-AppTSandDeploymentsInfo -appsToRemove $appsToRemove
+
+        if ($TSDeploymentsCheck.AppTSandDeploymentsInfoResult) {
+            # There are active deployments or task sequence references
+            $activeDeployments = $TSDeploymentsCheck.ActiveDeployments
+            $tsInfo = $TSDeploymentsCheck.TSInfo
+            $localizedDisplayName = $TSDeploymentsCheck.ApplicationName
+
+            if ($activeDeployments.Count -gt 0) {
+                Write-host ("The application {0} has the following active deployments. Please delete them first and re-run this script." -f $localizedDisplayName) -BackgroundColor Red
+                $activeDeployments | Format-Table -AutoSize
+            }
+
+            if ($tsInfo.Count -gt 0) {
+                Write-host ("The application {0} is referenced in the following task sequences. Please remove these first and re-run this script." -f $localizedDisplayName) -BackgroundColor Red
+                $tsInfo | Format-Table -AutoSize
+            }
+    
+        } else {
+            # No active deployments or task sequence references
+            $cleanupToggle = Read-Host "The following Apps will be removed, Continue [y/N]"
+		    if ($cleanupToggle -eq "y") {
+			    Remove-Applications -AppsToRemove $appsToRemove
+		    }
+        }
 	}
 	else {
 		Write-Host "No applications detected for cleanup!" -ForegroundColor Green
@@ -216,10 +323,10 @@ finally {
 	Pop-Location
 }
 # SIG # Begin signature block
-# MIIohwYJKoZIhvcNAQcCoIIoeDCCKHQCAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# MIIovgYJKoZIhvcNAQcCoIIorzCCKKsCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDUJc2xUaCLDX3F
-# RLtmsXTzVbPJF7/OxBE7/mH+mn4E46CCIYowggWNMIIEdaADAgECAhAOmxiO+dAt
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCA147BwPZ+BOpJo
+# 03y2mSGHXOy+tpe7xzGCWKxro4wRtKCCIcEwggWNMIIEdaADAgECAhAOmxiO+dAt
 # 5+/bUOIIQBhaMA0GCSqGSIb3DQEBDAUAMGUxCzAJBgNVBAYTAlVTMRUwEwYDVQQK
 # EwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xJDAiBgNV
 # BAMTG0RpZ2lDZXJ0IEFzc3VyZWQgSUQgUm9vdCBDQTAeFw0yMjA4MDEwMDAwMDBa
@@ -356,81 +463,82 @@ finally {
 # NTwAvb6cKmx5AdzaROY63jg7B145WPR8czFVoIARyxQMfq68/qTreWWqaNYiyjvr
 # moI1VygWy2nyMpqy0tg6uLFGhmu6F/3Ed2wVbK6rr3M66ElGt9V/zLY4wNjsHPW2
 # obhDLN9OTH0eaHDAdwrUAuBcYLso/zjlUlrWrBciI0707NMX+1Br/wd3H3GXREHJ
-# uEbTbDJ8WC9nR2XlG3O2mflrLAZG70Ee8PBf4NvZrZCARK+AEEGKMIIHyTCCBbGg
-# AwIBAgIQDMNw87U7UZ48Hv1za61jojANBgkqhkiG9w0BAQsFADBpMQswCQYDVQQG
+# uEbTbDJ8WC9nR2XlG3O2mflrLAZG70Ee8PBf4NvZrZCARK+AEEGKMIIIADCCBeig
+# AwIBAgIQD0un28igrZOh2Z+6mD8+TTANBgkqhkiG9w0BAQsFADBpMQswCQYDVQQG
 # EwJVUzEXMBUGA1UEChMORGlnaUNlcnQsIEluYy4xQTA/BgNVBAMTOERpZ2lDZXJ0
 # IFRydXN0ZWQgRzQgQ29kZSBTaWduaW5nIFJTQTQwOTYgU0hBMzg0IDIwMjEgQ0Ex
-# MB4XDTIzMDQwNzAwMDAwMFoXDTI2MDQzMDIzNTk1OVowgdExEzARBgsrBgEEAYI3
+# MB4XDTIyMDkxNTAwMDAwMFoXDTI1MDkxMDIzNTk1OVowgdExEzARBgsrBgEEAYI3
 # PAIBAxMCVVMxGTAXBgsrBgEEAYI3PAIBAhMIQ29sb3JhZG8xHTAbBgNVBA8MFFBy
 # aXZhdGUgT3JnYW5pemF0aW9uMRQwEgYDVQQFEwsyMDEzMTYzODMyNzELMAkGA1UE
 # BhMCVVMxETAPBgNVBAgTCENvbG9yYWRvMRQwEgYDVQQHEwtDYXN0bGUgUm9jazEZ
 # MBcGA1UEChMQUGF0Y2ggTXkgUEMsIExMQzEZMBcGA1UEAxMQUGF0Y2ggTXkgUEMs
-# IExMQzCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAKaQcs40YzBFv5HX
-# QFPd04rKJ4uBdwvAZLKuULy+icZOpgs/Sy329Ng5ikhB5o1IdvE2cOT20sjs3qgb
-# 4e+rqs7taTCe6RNLsDINsmcTlp4yxOfV80EZ08ld3o36GEgH0Vy1vrJXLTRKNULz
-# V7gIzF/e3tO1Fab4IxKZNcBSXiv8ORqcgT9O7/RZoqyG87iU6Q/dKfC4WzvU396X
-# J3FMZrI+s4CgV8p6pVNjijBjH7pmzoXynFtA0j6NH6tg4DmQvm+kfWXtWbDpPYhd
-# Fz1gccJt1DjTrJetpIwBzDAS8NGA75HQhBmQ3gcnNDJLgylB3HyWOeXS+vxXR0Pi
-# /W419cfn8zCFH0u2O4QFaZsT2HoIE/t9EhdAKdHoKwvVoCgwvlx3jjwFq5MnoB2o
-# JiNmTGQyhiRvCaw6JACKUa43eJvlRKylEy4INDTOX5BeivJoTqCw0cCAd6ZuRh6g
-# Rl8shIVfN78qunQqJZQkDimtQY5Sn33w+ee5/lFSxOxBg6iu7vCGPZ6QxJd6oVdR
-# a8t87vJ4QVlsMQQRa400S7kqIX1HOnbR3hxgvcks8kBRMYtZ8g3Fz/WTCW5sWbEx
-# Vpn6HC6DsRhosF/DBGYmIqQJz6odkCFCr7QcmpGjoZs4jRDegSC5utEusBYmvCfV
-# xtud3R43WEdCRfHuD1OFDm5HoonnAgMBAAGjggICMIIB/jAfBgNVHSMEGDAWgBRo
-# N+Drtjv4XxGG+/5hewiIZfROQjAdBgNVHQ4EFgQU3wgET0b7maQo7OF3wwGWm83h
-# l+0wDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMIG1BgNVHR8E
-# ga0wgaowU6BRoE+GTWh0dHA6Ly9jcmwzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRy
-# dXN0ZWRHNENvZGVTaWduaW5nUlNBNDA5NlNIQTM4NDIwMjFDQTEuY3JsMFOgUaBP
-# hk1odHRwOi8vY3JsNC5kaWdpY2VydC5jb20vRGlnaUNlcnRUcnVzdGVkRzRDb2Rl
-# U2lnbmluZ1JTQTQwOTZTSEEzODQyMDIxQ0ExLmNybDA9BgNVHSAENjA0MDIGBWeB
-# DAEDMCkwJwYIKwYBBQUHAgEWG2h0dHA6Ly93d3cuZGlnaWNlcnQuY29tL0NQUzCB
-# lAYIKwYBBQUHAQEEgYcwgYQwJAYIKwYBBQUHMAGGGGh0dHA6Ly9vY3NwLmRpZ2lj
-# ZXJ0LmNvbTBcBggrBgEFBQcwAoZQaHR0cDovL2NhY2VydHMuZGlnaWNlcnQuY29t
-# L0RpZ2lDZXJ0VHJ1c3RlZEc0Q29kZVNpZ25pbmdSU0E0MDk2U0hBMzg0MjAyMUNB
-# MS5jcnQwCQYDVR0TBAIwADANBgkqhkiG9w0BAQsFAAOCAgEADaIfBgYBzz7rZspA
-# w5OGKL7nt4eo6SMcS91NAex1HWxak4hX7yqQB25Oa66WaVBtd14rZxptoGQ88FDe
-# zI1qyUs4bwi4NaW9WBY8QDnGGhgyZ3aT3ZEBEvMWy6MFpzlyvjPBcWE5OGuoRMhP
-# 42TSMhvFlZGCPZy02PLUdGcTynL55YhdTcGJnX0Z2OgSaHUQTmXhgRX+fajIilPn
-# mmv8Av4Clr6Xa9SoNHltA04JRiCu4ejDGFqA94F696jSJ+AUYHys6bnPc0E8JB9Y
-# nFCAurPRG8YBJAofUtxnGIHGE0EiQTZeXf0nKmVBIXkE3hT4mZx7pH7wrlCr0FV4
-# qnq6j0uaj4oKqFbkdyzb5u+XQe9pPojshnjVzhIRK53wsGaFP4gSURxWvcThIOyo
-# aKrVDZOdLQZXEz8Anks3Vs5XscjyzFR7pv/3Reik7FaZRTvd5rDW6foDJOiCwX5p
-# +UnldHGHW83rDvtks1rwgKwuuxvCG3Bkjirl94EImpiugGaRQ7S2Lydxpqzv7Hng
-# 4YQbIIvVMNC7mNrVZPNWdF4/a9yjDt2nJrnRcDK1zvHBXSrAYIycQ6hhhlHS9Y4M
-# Rhz35t1du/Y0IXDB7HBYSvcsrpxtBzXLTd2NCNCtdkwYIl7WTQeoCbZWvo4PbzJB
-# OnPjs1tN4upe9XomxtZkNAwIOfMxggZTMIIGTwIBATB9MGkxCzAJBgNVBAYTAlVT
-# MRcwFQYDVQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1
-# c3RlZCBHNCBDb2RlIFNpZ25pbmcgUlNBNDA5NiBTSEEzODQgMjAyMSBDQTECEAzD
-# cPO1O1GePB79c2utY6IwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEK
-# MAigAoAAoQKAADAZBgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3
-# AgELMQ4wDAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg9ygdsLC9UXcoHOT9
-# 1A35QNlH/wCS7OFjymn8oggmUXkwDQYJKoZIhvcNAQEBBQAEggIAFhu4klSSCPor
-# bjAf9a7UrZLVUUm8/szLifDJnD4CPhkA36jxYFl+zOq2upmE7itL6RfE+Z/DX+BS
-# 1jzCWy1bbkWoIpqprqxI1tLoMXvYH6Tf14IbRrhZ+TcPrfIEz1yE+4RT9nuj+0W5
-# Odd6ma36xumD6aY9ePHyUKzrZv4jJHoyhvUh8CduUvS4r9D6AnCIv8bZVs6yITq4
-# 3oJZdOpMJhzp/2LRq5ZMYYjPX0zjdpGgFl6vItqvWwn7zL9EyjWSucQl+xhlJ6yn
-# E29bkGPvVx3id8FzQMSFwCj8yTwUG+k/TJTXZg2lZrvno79BuX2gPNxZpCpXEebp
-# 5N4HmgYdPzGtHL7kHR8Csp1CQUZ/pK75632QUDOOQEgDLGz47DqBcziWyr0QETj7
-# 1EbtNw/LOvpeas5O1gyDrKPTArsk9M4ZO37j84+A6EVxerPdaRyk5xnxapcI9lmn
-# uXSq7S3amUwJQB+H49QJo3KAdx4Hcdgr3CWFZDFkOo6RqihN0nQZ2sqvNMaP6okc
-# qffd2XznkhplHpvWEVlKMwLaGG3nfx+wkwDHJhzCvx7iwptVovKcM2Zk9D6JC68I
-# Z3LvVKPhKb3twE8gi1+jalzEwJArCrvYzWyfndbRBgtPRfDkDoInhY867/Okh/ya
-# lVkwJ2eFXMLGXJ+SOawwPNviTN5InQWhggMgMIIDHAYJKoZIhvcNAQkGMYIDDTCC
-# AwkCAQEwdzBjMQswCQYDVQQGEwJVUzEXMBUGA1UEChMORGlnaUNlcnQsIEluYy4x
-# OzA5BgNVBAMTMkRpZ2lDZXJ0IFRydXN0ZWQgRzQgUlNBNDA5NiBTSEEyNTYgVGlt
-# ZVN0YW1waW5nIENBAhAFRK/zlJ0IOaa/2z9f5WEWMA0GCWCGSAFlAwQCAQUAoGkw
-# GAYJKoZIhvcNAQkDMQsGCSqGSIb3DQEHATAcBgkqhkiG9w0BCQUxDxcNMjMxMTA0
-# MTQwNTM5WjAvBgkqhkiG9w0BCQQxIgQgxtm0YfzWFSa50yn2hLRrgCIJsgIChLyL
-# EcXjC6yGDtIwDQYJKoZIhvcNAQEBBQAEggIAMaw10YJQ8PE5V/365w2A45xNg/ek
-# N/a5ZEe79B8TgGUcHUEw+h8lp4SmTLvLB34TaejxvQf7Hg/JmDw7dShPPYI8TlwQ
-# LpD6LDU6zgW4TD99vBRVYfZ/A+AjqNPHTIQBfibEnJoXF3PWIhER68z9Q3wosM3m
-# fSkMvUHUYzEBK67nKb+S/I7XRL6SOMLdwZ5kEjuFKqZVEyxwLNb1M0+fB+Ohij/v
-# v2qwtPRzv34uEcM5QSYonSKlw3M1WoP7kO6mKJuV/Dna2MTWuGZGiQhqWwmPqhF3
-# qkgSl8S0y0EOidZ2S/mnF/mUygZYRi/9bJLGQXimRx/D5FjqJJEdGKoZMwPjKX/J
-# WOhD+T4l/VHtkik4HGjdabhMPnnOTYZi4/QhWQyQTKS3A2Z/xeSZnO/QGJsGiKs1
-# mP5dXKIOIKMhQXYtm9yL5aibxvJGs1RQ6/GdToaghMu9E26530jiZRGQ+ZFe5TzV
-# 0CMzOwF5JgV46k2JAEw7R7eKy9K4PsES1xeA8L75cPUryVod+bjNsL6iIeIe0iwo
-# zBTykMKjAAmA1vxWorBAaHkDfQbi0J8BMcmEjBTPgjUDxv4i0ZeD8QLuSX62gAhO
-# Tjr+Z/gtQDuIdnqEtbSdcQ0n7U5koe+MLzDfnV9vOeigL8Y1DCq5z8Df+FHMNHZ1
-# us35xezabYmokDo=
+# IExMQzCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAPKfoNjLgEqzlwL/
+# aZLSldCkRTfZQ1jvb6ZMhZYoxUdNpzUEGNpbdTB9NNg9rQdZCvPDFYxhz00bOtwF
+# dzzrO3V+4GxSPK7BBKkCASx5Oe9rVG9u0vmU2vCsnROMtczK8UBiERD+/W+FYN2A
+# gQwdYaUsaPMT/QNlfVuhOEjFQXBYoCMMO/cNXUQLZkIwF4GacaGMh9TUSub8K9y8
+# OMz5AQyjmfTxUrBLUzi0WJS1eDoTAeJ7BIrvT7+je+gEtYe9OpIz2gTJmYUykIUs
+# Ix7A8OtTyp6j7tdMDahwyW1DXvUnFQHUViXisvajSiuCGePtet1lc+wyJizGF6Iv
+# MBjw/xLk/38ZARs44iNFNVyEvga6L4pWOPp4Ul9VmFrqWTp8Pt4sppA7yE/1OjsY
+# A0Xk0x3m6HiUiCUjwhY8eRhBCp5me+1SR8LHwhsS2TSO8rYkaFjctnRpjpwhqN2h
+# Z/q7WIIhmZRoHxH0RPQrPJPHkdBes7OM7SVrZTts7IhREXR4PXeeCRDWiNIIb6pT
+# mJiUGnrx7gy0ayilUOfEPbw0I2PSckBXfvqxxvnJGr+BZWYhIUC6/cHUhqwfFVN7
+# tq8nYiAGSLLFhJT1vJWGZBVVNbpDC9joAbu9SvD48at2TrOf6iHpz/yhgC+iPhji
+# oJRMOJK2Km0U0jC0dqtJhJNmfZeXAgMBAAGjggI5MIICNTAfBgNVHSMEGDAWgBRo
+# N+Drtjv4XxGG+/5hewiIZfROQjAdBgNVHQ4EFgQUvTyL42xnOtRlK27xT25Ih8aM
+# TPcwMgYDVR0RBCswKaAnBggrBgEFBQcIA6AbMBkMF1VTLUNPTE9SQURPLTIwMTMx
+# NjM4MzI3MA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDAzCBtQYD
+# VR0fBIGtMIGqMFOgUaBPhk1odHRwOi8vY3JsMy5kaWdpY2VydC5jb20vRGlnaUNl
+# cnRUcnVzdGVkRzRDb2RlU2lnbmluZ1JTQTQwOTZTSEEzODQyMDIxQ0ExLmNybDBT
+# oFGgT4ZNaHR0cDovL2NybDQuZGlnaWNlcnQuY29tL0RpZ2lDZXJ0VHJ1c3RlZEc0
+# Q29kZVNpZ25pbmdSU0E0MDk2U0hBMzg0MjAyMUNBMS5jcmwwPQYDVR0gBDYwNDAy
+# BgVngQwBAzApMCcGCCsGAQUFBwIBFhtodHRwOi8vd3d3LmRpZ2ljZXJ0LmNvbS9D
+# UFMwgZQGCCsGAQUFBwEBBIGHMIGEMCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5k
+# aWdpY2VydC5jb20wXAYIKwYBBQUHMAKGUGh0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0
+# LmNvbS9EaWdpQ2VydFRydXN0ZWRHNENvZGVTaWduaW5nUlNBNDA5NlNIQTM4NDIw
+# MjFDQTEuY3J0MAwGA1UdEwEB/wQCMAAwDQYJKoZIhvcNAQELBQADggIBAFdPoh+i
+# Ebsklh04Gal6DTgKSnw/5mO/k4oXMPKhmP/eYgTfvf2hwSewe9W2IK2/VH0HutUM
+# k603cVtcyK1ppiDkR0MTshD7BVWHeAXJQmAjLQUr83vLh4WhPOZ2+R+GxWT3s1Ts
+# /LFAF5qYHpd5+PhbLtSB/px50k0ouX/Dc/kYtKYN7/VBve01gkV+pbBsVRNvjv2T
+# fAMTBDongJD3J5J+fy7PVZVGFvLpjZRtQjHeai6vM7Lwuh9o/dtPTQV7abeP8hmO
+# xhQ9qRMXYSeoFkTw8+d/9/wPoQzBuwxN1gNSCRGEof4NamrcnUHtOCcrUWbKAE3r
+# eqAtZPHFqiVBCwUCUADZ00mDtwZ7qEOUp71l/1K1j3rNLXGSkkONuHbIaZA3PsCq
+# s0ltIE6/5Od8QfJRK2wkUu4vaumgQKJXKDinqMTXi4eTsjq1D6+qsp6vnc+O2xw3
+# 6yzs8CUyolD14fRRDb2QNvHlWzuG/JgsRsm+HY7Yp8vIqVc73PFor6+Fe2BMnTCN
+# bVkEV5Xi3dekkTYAV/sQxd8XlOBK+iHo/Ht4ggyzqhYjNfdXrD4Xh0zBsJfOIceO
+# ZY2+mb3mPg5otvURSJS8EpIHWlRBalzzLJwwdY4yz9pU05L250wEY+iUyowJR5BD
+# nvokCtKa07dYpdwxvYE1l5Iz6NBCEr4SMbvRMYIGUzCCBk8CAQEwfTBpMQswCQYD
+# VQQGEwJVUzEXMBUGA1UEChMORGlnaUNlcnQsIEluYy4xQTA/BgNVBAMTOERpZ2lD
+# ZXJ0IFRydXN0ZWQgRzQgQ29kZSBTaWduaW5nIFJTQTQwOTYgU0hBMzg0IDIwMjEg
+# Q0ExAhAPS6fbyKCtk6HZn7qYPz5NMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQB
+# gjcCAQwxCjAIoAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYK
+# KwYBBAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIDORZwr/
+# 8sNMhcwSo1zHeJbVlTBlhrOB5XhaK+s0xKgVMA0GCSqGSIb3DQEBAQUABIICAJkF
+# NtDjQp8c41H4US4k8LfRdGAdYZVnLT7twczSuxBbefqY7UpukNTASL8s71ATZDlz
+# q2fsnxMhfY3LNBrwurrpiHqaDSLJgZQmFDi+04L0x7yqdZ1GQ13yJ6HDm36bJdSJ
+# dGfQgI4xle+pOK5kspv4WmaJJWHu43TlAXAD5arGah/PrCCD7I/fdOoZlUZQJqAZ
+# GPS/ok8jO7aRniDgzHNe3uhIToZCG3cN/FD4jZDNpEFabIW8NXYnSwZ2dHLqpSz+
+# nJgYnhBQbtL5kedei3IxeLojIXOa2xOSRcNbbRzbkNH4ctOWGp0J7bU8jdh3/yq9
+# DEkzPb2FP80ELk3sGA26Xz0cFx2dXBEF9iNcZ+d9EXwChBIcrWIp+vsRTtjqfHSg
+# yStWg1GW2eypihcG7115c/x6oroSaJWIAAPxUsmuQGPfU+d6/l9dGcHAA87bIUan
+# Z8qjIauTrlT6awE9gwoaxoPM+Di2Q3loxtUUqC6o9hLcEHsIoDsK8DISneJGCQ8L
+# g2Ko9YvECqMkIOxdjTbDR4AuTgpJ4+/8mzcMtSgqnUrI82jUQ1dZuANRhrJ1leEK
+# TOdk6NXEjHnFPHeTsPT5fb1EvGxDyZxrcP7D9nxb95tbzQkqOatomDR3tH78v92j
+# M3CKN5SR77xM+KbbxtnSfjEQzVJfPPZ9IHG0bnqdoYIDIDCCAxwGCSqGSIb3DQEJ
+# BjGCAw0wggMJAgEBMHcwYzELMAkGA1UEBhMCVVMxFzAVBgNVBAoTDkRpZ2lDZXJ0
+# LCBJbmMuMTswOQYDVQQDEzJEaWdpQ2VydCBUcnVzdGVkIEc0IFJTQTQwOTYgU0hB
+# MjU2IFRpbWVTdGFtcGluZyBDQQIQBUSv85SdCDmmv9s/X+VhFjANBglghkgBZQME
+# AgEFAKBpMBgGCSqGSIb3DQEJAzELBgkqhkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8X
+# DTIzMTEwNzEyNTAwNVowLwYJKoZIhvcNAQkEMSIEIO5DYalO72vdzYyGUDSAv4tT
+# ex3r3h6GbhDCAdt/8DrQMA0GCSqGSIb3DQEBAQUABIICAIMdt+mfV1mXe1hLNTF6
+# Tuu9PTr7/q9b0xwn+5odEMLT7VUnLEeDNEUZ/kNTcc4H5CXBw2p/eD7Fggtw/cUT
+# w4v5nLN4QrYmg/bEE4ObXdIYRtBDDeFf629WqsVUkKe+G+mGEs8yvnOTnwuvs1Y+
+# qkIcgZI7HFebCyzDl0Xqxp52FRFyAqYm9NCG1R7FxrQaARxX5HJ+874npRpTTLex
+# 828OcuqLFMmT4E+AhPEFKyK2Chbl76bVnVseWBvH/me7vE7Ea36O7YHTHXzy4gzw
+# tl905gd4y6LsCd15bDND8m58MJFwS2YXpXjSsx8ax9LnaOkuRD536B5VDlon8h6f
+# LeaRGll87bQePxCMKGcIzeLpsB1QYa+M5jOSStnF7PLQP753pBfdsu1m4n+uc0gu
+# YXINrR7lUXjLNdhm9REqkc3QAvmO0BihluUMoJK+AuFrF6KCP8E8lX3ExaY8WYOC
+# by1bDfYHfbCTCQvEF9zdS/dXdWkVQwBbWZSLfmw+S3WwcviCx8ut+tCfatkiWjon
+# wiRuFEqza2vhbyH89CjF0ExQ0duFdaMm0loEH0jzZT98gZW9ciknlpx23IU2Ygja
+# x6hkd2m+75Er+pqJ7+HbMzxyAiTF9pUD50qQd30t/8nn0E6uLDA0IPi2BqrEQhCx
+# 3Y6d6xA/e19ktSPnKFie/LuQ
 # SIG # End signature block
