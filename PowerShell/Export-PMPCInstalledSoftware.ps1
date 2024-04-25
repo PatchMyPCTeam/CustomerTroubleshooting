@@ -2,7 +2,8 @@
 .SYNOPSIS
     Get installed software from the local computer's registry and export to .csv
 .DESCRIPTION
-    Get installed software from the local computer's registry and export to .csv
+    Get installed software from the local computer's registry and export to .csv.
+    Run with admin rights if trying to determine which user installed a per-user MSI and it was not the current user.
 .PARAMETER FilePath
     The desired path to the CSV to export. This defaults to $PSScriptRoot.
 .PARAMETER FileName
