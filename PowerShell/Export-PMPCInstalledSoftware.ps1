@@ -18,6 +18,7 @@
         - HKLM:\SOFTWARE\WOW6432NODE\Microsoft\Windows\CurrentVersion\Uninstall
         - HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall
         - HKCU:\SOFTWARE\WOW6432NODE\Microsoft\Windows\CurrentVersion\Uninstall
+        - HKU:\*\
 .NOTES
     ################# DISCLAIMER #################
     Patch My PC provides scripts, macro, and other code examples for illustration only, without warranty 
@@ -34,7 +35,7 @@ param(
             }
             return $true
         })]
-    [String]$FilePath = $PSScriptRoot,
+    [String]$FilePath,
 
     [Parameter()]
     [ValidatePattern('\.csv$')]
@@ -80,6 +81,95 @@ function Get-MsiInstallationContext {
     }
 }
 
+function Import-RegistryHive {
+    param (
+        [Parameter(Mandatory)]
+        [String]$File,
+
+        [Parameter(Mandatory)]
+        [String]$Name
+    )
+
+    $TestDrive = Get-PSDrive -Name $Name -ErrorAction 'SilentlyContinue'
+
+    if ($null -ne $TestDrive) {
+        return $TestDrive
+    }
+
+    $Key = 'HKU\{0}' -f $Name
+
+    $Process = Start-Process -FilePath "$env:WINDIR\system32\reg.exe" -ArgumentList "load $Key $File" -WindowStyle 'Hidden' -PassThru -Wait
+
+    if ($Process.ExitCode) {
+        Write-Host ('Could not load the registry hive "{0}", exit code: {1}' -f $File, $Process.ExitCode) -ForegroundColor 'Red'
+        return
+    }
+
+    try {
+        New-PSDrive -Name $Name -PSProvider 'Registry' -Root $Key -Scope 'Script' -ErrorAction 'Stop'
+    }
+    catch {
+        Write-Host ('Could not create the PSDrive "{0}", error: {1}' -f $Name, $_.Exception.Message) -ForegroundColor 'Red'
+    }
+}
+
+function Remove-RegistryHive {
+    param (
+        [Parameter(Mandatory, ValueFromPipelineByPropertyName)]
+        [Alias('SID')]
+        [String[]]$Name
+    )
+    process {
+        foreach ($item in $Name) {
+            $Drive = Get-PSDrive -Name $item -ErrorAction 'SilentlyContinue'
+            if ($null -eq $Drive) { continue }
+
+            try {
+                Remove-PSDrive $Drive.Name -ErrorAction 'Stop'
+            }
+            catch {
+                Write-Host ('Could not remove the PSDrive "{0}", error: {1}' -f $Drive.Name, $_.Exception.Message) -ForegroundColor 'Red'
+                Write-Host 'Trying to unload registry hive anyway...' -ForegroundColor 'Red'
+            }
+
+            # Without this, releasing the registry key occasionally doesn't happen in time before calling reg.exe unload
+            [System.GC]::Collect()
+
+            # Don't unload the SYSTEM hive
+            if ($item -eq 'S-1-5-18') { continue }
+
+            $Key = $Drive.Root
+            $Process = Start-Process -FilePath "$env:WINDIR\system32\reg.exe" -ArgumentList "unload $Key" -WindowStyle 'Hidden' -PassThru -Wait
+    
+            if ($Process.ExitCode) {
+                Write-Host ('Could not unload the registry hive "{0}", exit code: {1}' -f $Key, $Process.ExitCode) -ForegroundColor 'Red'
+            }
+        }
+    }
+}
+
+function New-PSSystemRegistryHiveDrive {
+    $TestDrive = Get-PSDrive -Name 'S-1-5-18' -ErrorAction 'SilentlyContinue'
+
+    if ($null -ne $TestDrive) {
+        return $TestDrive
+    }
+
+    New-PSDrive -Name 'S-1-5-18' -PSProvider 'Registry' -Root 'HKU\S-1-5-18' -Scope 'Script' -ErrorAction 'Stop'
+}
+
+function Test-Administrator {
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $IsAdministrator = [Security.Principal.WindowsPrincipal]::new($user).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
+
+    $Username = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    
+    $IsAdministrator -or $Username -eq 'NT AUTHORITY\SYSTEM'
+}
+
+# Match AD, AAD, and system profile SID formats
+$PatternSID = '^S-1-(5-21|12)(-[^\s_]+)*$'
+
 $PropertyNames = @(
     'DisplayName',
     'DisplayVersion',
@@ -89,27 +179,88 @@ $PropertyNames = @(
     'QuietUninstallString', 
     'SystemComponent',
     'WindowsInstaller',
-    @{Label = 'MSIAllUsers'; Expression = { if ($_.WindowsInstaller) { (Get-MsiInstallationContext ($_.PSChildName) -ErrorAction Ignore).AllUsers } } },
-    @{Label = 'MSICurrentUser'; Expression = { if ($_.WindowsInstaller) { (Get-MsiInstallationContext ($_.PSChildName) -ErrorAction Ignore).CurrentUser } } },
-    @{Label = 'MSIUsers'; Expression = { if ($_.WindowsInstaller) { (Get-MsiInstallationContext ($_.PSChildName) -ErrorAction Ignore).Users -join ', ' } } },
-    @{Label = 'RegistryKey'; Expression = { $_.PSChildName } },
+    @{Label = 'Username';         Expression = { 
+            switch -Regex ($_.PSDrive) {
+                'HKLM'      { 'LocalMachine' }
+                'HKCU'      { '{0}\{1}' -f $env:userdomain, $env:username }
+                'S-1-5-18'  { 'NT AUTHORITY\SYSTEM' }
+                $PatternSID {
+                    try {
+                        [System.Security.Principal.SecurityIdentifier]$SID = $_.Name
+                        $SID.Translate([System.Security.Principal.NTAccount]).Value
+                    }
+                    catch {
+                        $_.Name
+                    }
+                }
+            }
+        } 
+    }
+    @{Label = 'MSIAllUsers';     Expression = { if ($_.WindowsInstaller) { (Get-MsiInstallationContext ($_.PSChildName) -ErrorAction Ignore).AllUsers } } },
+    @{Label = 'MSICurrentUser';  Expression = { if ($_.WindowsInstaller) { (Get-MsiInstallationContext ($_.PSChildName) -ErrorAction Ignore).CurrentUser } } },
+    @{Label = 'MSIUsers';        Expression = { if ($_.WindowsInstaller) { (Get-MsiInstallationContext ($_.PSChildName) -ErrorAction Ignore).Users -join ', ' } } },
+    @{Label = 'RegistryKey';     Expression = { $_.PSChildName } },
     @{Label = 'RegistryKeyFull'; Expression = { $_.PSPath -replace 'Microsoft.PowerShell.Core\\Registry::' } }
 )
 
-$AllPathsToSearch = foreach ($Hive in 'HKEY_CURRENT_USER', 'HKEY_LOCAL_MACHINE') {
-    foreach ($ArchitectureRoot in 'SOFTWARE', 'SOFTWARE\WOW6432Node') {
-        [String]::Format('registry::{0}\{1}\Microsoft\Windows\CurrentVersion\Uninstall\*', $Hive, $ArchitectureRoot)
+[array]$Hives = 'HKLM'
+
+if (Test-Administrator) {
+    $Hives += New-PSSystemRegistryHiveDrive | Select-Object -ExpandProperty 'Name'
+
+    $ProfileList = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\*' | 
+                        Where-Object { $_.PSChildName -match $PatternSID } | 
+                        Select-Object @(
+                            @{ Label = 'SID';      Expression = { $_.PSChildName } }, 
+                            @{ Label = 'Hive';     Expression = { $Path = '{0}\ntuser.dat' -f $_.ProfileImagePath; if (Test-Path -Path $Path) { $Path } } },
+                            @{ Label = 'isLoaded'; Expression = { Test-Path -Path "Registry::HKU\$($_.PSChildName)" } }
+                        )
+    
+    $Hives += foreach ($_Profile in $ProfileList) {
+        if (-not $_Profile.isLoaded) {
+            Import-RegistryHive -File $_Profile.Hive -Name $_Profile.SID | Select-Object -ExpandProperty 'Name'
+        }
+        else {
+            try {
+                New-PSDrive -Name $_Profile.SID -PSProvider 'Registry' -Root "HKU\$($_Profile.SID)" -Scope 'Script' -ErrorAction 'Stop' |
+                    Select-Object -ExpandProperty 'Name'
+            }
+            catch {
+                Write-Host ('Could not create the PSDrive for currently logged in user "{0}", error: {1}' -f $_Profile.SID, $_.Exception.Message) -ForegroundColor 'Red'
+            }
+        }
     }
 }
-    
-try {
-    $AllFoundObjects = Get-ItemProperty -Path $AllPathsToSearch -ErrorAction 'Stop' | 
-    Where-Object { -not [String]::IsNullOrWhiteSpace($_.DisplayName) } |
-    Select-Object -Property $PropertyNames
+else {
+    Write-Host 'The script is not running as an administrator, only querying HKLM and HKCU' -ForegroundColor 'Cyan'
+    Write-Host 'To query all user profiles, please run the script as an administrator' -ForegroundColor 'Cyan'
+
+    # Don't query HKCU if the script is running as SYSTEM or the logged in user is an admin, to avoid dupes in output
+    $Hives += 'HKCU'
 }
-catch {
-    Write-Verbose "An error occurred while gathering the properties from the registry hives. Error: $($_.Exception.Message)" -Verbose
-    throw
+
+$AllPathsToSearch = foreach ($Hive in $Hives) {
+    foreach ($ArchitectureRoot in 'SOFTWARE', 'SOFTWARE\WOW6432Node') {
+        '{0}:\{1}\Microsoft\Windows\CurrentVersion\Uninstall\*' -f $Hive, $ArchitectureRoot
+    }
+}
+
+$AllFoundObjects = foreach ($Path in $AllPathsToSearch) {
+    try {
+        if (Test-Path $Path) {
+            Get-ItemProperty -Path $Path -ErrorAction 'Stop' | 
+                Where-Object { -not [String]::IsNullOrWhiteSpace($_.DisplayName) } | 
+                Select-Object -Property $PropertyNames
+        }
+    }
+    catch {
+        Write-Verbose "An error occurred while querying $Path" -Verbose
+        Write-Error $_
+    }
+}
+
+if (-not $PSBoundParameters.ContainsKey('FilePath')) {
+	$FilePath = $PSScriptRoot
 }
 
 if ($ExcludeComputerNameInFileName.IsPresent) {
@@ -119,227 +270,11 @@ else {
     $ExportCsvPath = '{0}\{1}-{2}' -f $FilePath, $env:ComputerName, $FileName
 }
 
-$AllFoundObjects | Export-Csv -Path $ExportCsvPath -Force -NoTypeInformation -ErrorAction 'Stop'
+$ProfileList.Where{ -not $_.isLoaded } | Remove-RegistryHive
+
+$AllFoundObjects | 
+    Sort-Object -Property 'DisplayName' | Export-Csv -Path $ExportCsvPath -Force -NoTypeInformation -ErrorAction 'Stop'
 
 if (Test-Path $ExportCsvPath) {
-    Write-Verbose ('Successfully created "{0}" on host "{1}", please share this .csv with Patch My PC support' -f $ExportCsvPath, $env:ComputerName) -Verbose
+    Write-Host ('Successfully created "{0}" on host "{1}", please share this .csv with Patch My PC support' -f $ExportCsvPath, $env:ComputerName) -ForegroundColor 'Green'
 }
-# SIG # Begin signature block
-# MIIohwYJKoZIhvcNAQcCoIIoeDCCKHQCAQExDzANBglghkgBZQMEAgEFADB5Bgor
-# BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAyxqgKakwDCu0I
-# rmClBZX809gEl8XYXTvnzjuFxxb+rqCCIYowggWNMIIEdaADAgECAhAOmxiO+dAt
-# 5+/bUOIIQBhaMA0GCSqGSIb3DQEBDAUAMGUxCzAJBgNVBAYTAlVTMRUwEwYDVQQK
-# EwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xJDAiBgNV
-# BAMTG0RpZ2lDZXJ0IEFzc3VyZWQgSUQgUm9vdCBDQTAeFw0yMjA4MDEwMDAwMDBa
-# Fw0zMTExMDkyMzU5NTlaMGIxCzAJBgNVBAYTAlVTMRUwEwYDVQQKEwxEaWdpQ2Vy
-# dCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xITAfBgNVBAMTGERpZ2lD
-# ZXJ0IFRydXN0ZWQgUm9vdCBHNDCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoC
-# ggIBAL/mkHNo3rvkXUo8MCIwaTPswqclLskhPfKK2FnC4SmnPVirdprNrnsbhA3E
-# MB/zG6Q4FutWxpdtHauyefLKEdLkX9YFPFIPUh/GnhWlfr6fqVcWWVVyr2iTcMKy
-# unWZanMylNEQRBAu34LzB4TmdDttceItDBvuINXJIB1jKS3O7F5OyJP4IWGbNOsF
-# xl7sWxq868nPzaw0QF+xembud8hIqGZXV59UWI4MK7dPpzDZVu7Ke13jrclPXuU1
-# 5zHL2pNe3I6PgNq2kZhAkHnDeMe2scS1ahg4AxCN2NQ3pC4FfYj1gj4QkXCrVYJB
-# MtfbBHMqbpEBfCFM1LyuGwN1XXhm2ToxRJozQL8I11pJpMLmqaBn3aQnvKFPObUR
-# WBf3JFxGj2T3wWmIdph2PVldQnaHiZdpekjw4KISG2aadMreSx7nDmOu5tTvkpI6
-# nj3cAORFJYm2mkQZK37AlLTSYW3rM9nF30sEAMx9HJXDj/chsrIRt7t/8tWMcCxB
-# YKqxYxhElRp2Yn72gLD76GSmM9GJB+G9t+ZDpBi4pncB4Q+UDCEdslQpJYls5Q5S
-# UUd0viastkF13nqsX40/ybzTQRESW+UQUOsxxcpyFiIJ33xMdT9j7CFfxCBRa2+x
-# q4aLT8LWRV+dIPyhHsXAj6KxfgommfXkaS+YHS312amyHeUbAgMBAAGjggE6MIIB
-# NjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBTs1+OC0nFdZEzfLmc/57qYrhwP
-# TzAfBgNVHSMEGDAWgBRF66Kv9JLLgjEtUYunpyGd823IDzAOBgNVHQ8BAf8EBAMC
-# AYYweQYIKwYBBQUHAQEEbTBrMCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5kaWdp
-# Y2VydC5jb20wQwYIKwYBBQUHMAKGN2h0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0LmNv
-# bS9EaWdpQ2VydEFzc3VyZWRJRFJvb3RDQS5jcnQwRQYDVR0fBD4wPDA6oDigNoY0
-# aHR0cDovL2NybDMuZGlnaWNlcnQuY29tL0RpZ2lDZXJ0QXNzdXJlZElEUm9vdENB
-# LmNybDARBgNVHSAECjAIMAYGBFUdIAAwDQYJKoZIhvcNAQEMBQADggEBAHCgv0Nc
-# Vec4X6CjdBs9thbX979XB72arKGHLOyFXqkauyL4hxppVCLtpIh3bb0aFPQTSnov
-# Lbc47/T/gLn4offyct4kvFIDyE7QKt76LVbP+fT3rDB6mouyXtTP0UNEm0Mh65Zy
-# oUi0mcudT6cGAxN3J0TU53/oWajwvy8LpunyNDzs9wPHh6jSTEAZNUZqaVSwuKFW
-# juyk1T3osdz9HNj0d1pcVIxv76FQPfx2CWiEn2/K2yCNNWAcAgPLILCsWKAOQGPF
-# mCLBsln1VWvPJ6tsds5vIy30fnFqI2si/xK4VC0nftg62fC2h5b9W9FcrBjDTZ9z
-# twGpn1eqXijiuZQwggauMIIElqADAgECAhAHNje3JFR82Ees/ShmKl5bMA0GCSqG
-# SIb3DQEBCwUAMGIxCzAJBgNVBAYTAlVTMRUwEwYDVQQKEwxEaWdpQ2VydCBJbmMx
-# GTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xITAfBgNVBAMTGERpZ2lDZXJ0IFRy
-# dXN0ZWQgUm9vdCBHNDAeFw0yMjAzMjMwMDAwMDBaFw0zNzAzMjIyMzU5NTlaMGMx
-# CzAJBgNVBAYTAlVTMRcwFQYDVQQKEw5EaWdpQ2VydCwgSW5jLjE7MDkGA1UEAxMy
-# RGlnaUNlcnQgVHJ1c3RlZCBHNCBSU0E0MDk2IFNIQTI1NiBUaW1lU3RhbXBpbmcg
-# Q0EwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAwggIKAoICAQDGhjUGSbPBPXJJUVXH
-# JQPE8pE3qZdRodbSg9GeTKJtoLDMg/la9hGhRBVCX6SI82j6ffOciQt/nR+eDzMf
-# UBMLJnOWbfhXqAJ9/UO0hNoR8XOxs+4rgISKIhjf69o9xBd/qxkrPkLcZ47qUT3w
-# 1lbU5ygt69OxtXXnHwZljZQp09nsad/ZkIdGAHvbREGJ3HxqV3rwN3mfXazL6IRk
-# tFLydkf3YYMZ3V+0VAshaG43IbtArF+y3kp9zvU5EmfvDqVjbOSmxR3NNg1c1eYb
-# qMFkdECnwHLFuk4fsbVYTXn+149zk6wsOeKlSNbwsDETqVcplicu9Yemj052FVUm
-# cJgmf6AaRyBD40NjgHt1biclkJg6OBGz9vae5jtb7IHeIhTZgirHkr+g3uM+onP6
-# 5x9abJTyUpURK1h0QCirc0PO30qhHGs4xSnzyqqWc0Jon7ZGs506o9UD4L/wojzK
-# QtwYSH8UNM/STKvvmz3+DrhkKvp1KCRB7UK/BZxmSVJQ9FHzNklNiyDSLFc1eSuo
-# 80VgvCONWPfcYd6T/jnA+bIwpUzX6ZhKWD7TA4j+s4/TXkt2ElGTyYwMO1uKIqjB
-# Jgj5FBASA31fI7tk42PgpuE+9sJ0sj8eCXbsq11GdeJgo1gJASgADoRU7s7pXche
-# MBK9Rp6103a50g5rmQzSM7TNsQIDAQABo4IBXTCCAVkwEgYDVR0TAQH/BAgwBgEB
-# /wIBADAdBgNVHQ4EFgQUuhbZbU2FL3MpdpovdYxqII+eyG8wHwYDVR0jBBgwFoAU
-# 7NfjgtJxXWRM3y5nP+e6mK4cD08wDgYDVR0PAQH/BAQDAgGGMBMGA1UdJQQMMAoG
-# CCsGAQUFBwMIMHcGCCsGAQUFBwEBBGswaTAkBggrBgEFBQcwAYYYaHR0cDovL29j
-# c3AuZGlnaWNlcnQuY29tMEEGCCsGAQUFBzAChjVodHRwOi8vY2FjZXJ0cy5kaWdp
-# Y2VydC5jb20vRGlnaUNlcnRUcnVzdGVkUm9vdEc0LmNydDBDBgNVHR8EPDA6MDig
-# NqA0hjJodHRwOi8vY3JsMy5kaWdpY2VydC5jb20vRGlnaUNlcnRUcnVzdGVkUm9v
-# dEc0LmNybDAgBgNVHSAEGTAXMAgGBmeBDAEEAjALBglghkgBhv1sBwEwDQYJKoZI
-# hvcNAQELBQADggIBAH1ZjsCTtm+YqUQiAX5m1tghQuGwGC4QTRPPMFPOvxj7x1Bd
-# 4ksp+3CKDaopafxpwc8dB+k+YMjYC+VcW9dth/qEICU0MWfNthKWb8RQTGIdDAiC
-# qBa9qVbPFXONASIlzpVpP0d3+3J0FNf/q0+KLHqrhc1DX+1gtqpPkWaeLJ7giqzl
-# /Yy8ZCaHbJK9nXzQcAp876i8dU+6WvepELJd6f8oVInw1YpxdmXazPByoyP6wCeC
-# RK6ZJxurJB4mwbfeKuv2nrF5mYGjVoarCkXJ38SNoOeY+/umnXKvxMfBwWpx2cYT
-# gAnEtp/Nh4cku0+jSbl3ZpHxcpzpSwJSpzd+k1OsOx0ISQ+UzTl63f8lY5knLD0/
-# a6fxZsNBzU+2QJshIUDQtxMkzdwdeDrknq3lNHGS1yZr5Dhzq6YBT70/O3itTK37
-# xJV77QpfMzmHQXh6OOmc4d0j/R0o08f56PGYX/sr2H7yRp11LB4nLCbbbxV7HhmL
-# NriT1ObyF5lZynDwN7+YAN8gFk8n+2BnFqFmut1VwDophrCYoCvtlUG3OtUVmDG0
-# YgkPCr2B2RP+v6TR81fZvAT6gt4y3wSJ8ADNXcL50CN/AAvkdgIm2fBldkKmKYcJ
-# RyvmfxqkhQ/8mJb2VVQrH4D6wPIOK+XW+6kvRBVK5xMOHds3OBqhK/bt1nz8MIIG
-# sDCCBJigAwIBAgIQCK1AsmDSnEyfXs2pvZOu2TANBgkqhkiG9w0BAQwFADBiMQsw
-# CQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3d3cu
-# ZGlnaWNlcnQuY29tMSEwHwYDVQQDExhEaWdpQ2VydCBUcnVzdGVkIFJvb3QgRzQw
-# HhcNMjEwNDI5MDAwMDAwWhcNMzYwNDI4MjM1OTU5WjBpMQswCQYDVQQGEwJVUzEX
-# MBUGA1UEChMORGlnaUNlcnQsIEluYy4xQTA/BgNVBAMTOERpZ2lDZXJ0IFRydXN0
-# ZWQgRzQgQ29kZSBTaWduaW5nIFJTQTQwOTYgU0hBMzg0IDIwMjEgQ0ExMIICIjAN
-# BgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEA1bQvQtAorXi3XdU5WRuxiEL1M4zr
-# PYGXcMW7xIUmMJ+kjmjYXPXrNCQH4UtP03hD9BfXHtr50tVnGlJPDqFX/IiZwZHM
-# gQM+TXAkZLON4gh9NH1MgFcSa0OamfLFOx/y78tHWhOmTLMBICXzENOLsvsI8Irg
-# nQnAZaf6mIBJNYc9URnokCF4RS6hnyzhGMIazMXuk0lwQjKP+8bqHPNlaJGiTUyC
-# EUhSaN4QvRRXXegYE2XFf7JPhSxIpFaENdb5LpyqABXRN/4aBpTCfMjqGzLmysL0
-# p6MDDnSlrzm2q2AS4+jWufcx4dyt5Big2MEjR0ezoQ9uo6ttmAaDG7dqZy3SvUQa
-# khCBj7A7CdfHmzJawv9qYFSLScGT7eG0XOBv6yb5jNWy+TgQ5urOkfW+0/tvk2E0
-# XLyTRSiDNipmKF+wc86LJiUGsoPUXPYVGUztYuBeM/Lo6OwKp7ADK5GyNnm+960I
-# HnWmZcy740hQ83eRGv7bUKJGyGFYmPV8AhY8gyitOYbs1LcNU9D4R+Z1MI3sMJN2
-# FKZbS110YU0/EpF23r9Yy3IQKUHw1cVtJnZoEUETWJrcJisB9IlNWdt4z4FKPkBH
-# X8mBUHOFECMhWWCKZFTBzCEa6DgZfGYczXg4RTCZT/9jT0y7qg0IU0F8WD1Hs/q2
-# 7IwyCQLMbDwMVhECAwEAAaOCAVkwggFVMBIGA1UdEwEB/wQIMAYBAf8CAQAwHQYD
-# VR0OBBYEFGg34Ou2O/hfEYb7/mF7CIhl9E5CMB8GA1UdIwQYMBaAFOzX44LScV1k
-# TN8uZz/nupiuHA9PMA4GA1UdDwEB/wQEAwIBhjATBgNVHSUEDDAKBggrBgEFBQcD
-# AzB3BggrBgEFBQcBAQRrMGkwJAYIKwYBBQUHMAGGGGh0dHA6Ly9vY3NwLmRpZ2lj
-# ZXJ0LmNvbTBBBggrBgEFBQcwAoY1aHR0cDovL2NhY2VydHMuZGlnaWNlcnQuY29t
-# L0RpZ2lDZXJ0VHJ1c3RlZFJvb3RHNC5jcnQwQwYDVR0fBDwwOjA4oDagNIYyaHR0
-# cDovL2NybDMuZGlnaWNlcnQuY29tL0RpZ2lDZXJ0VHJ1c3RlZFJvb3RHNC5jcmww
-# HAYDVR0gBBUwEzAHBgVngQwBAzAIBgZngQwBBAEwDQYJKoZIhvcNAQEMBQADggIB
-# ADojRD2NCHbuj7w6mdNW4AIapfhINPMstuZ0ZveUcrEAyq9sMCcTEp6QRJ9L/Z6j
-# fCbVN7w6XUhtldU/SfQnuxaBRVD9nL22heB2fjdxyyL3WqqQz/WTauPrINHVUHmI
-# moqKwba9oUgYftzYgBoRGRjNYZmBVvbJ43bnxOQbX0P4PpT/djk9ntSZz0rdKOtf
-# JqGVWEjVGv7XJz/9kNF2ht0csGBc8w2o7uCJob054ThO2m67Np375SFTWsPK6Wrx
-# oj7bQ7gzyE84FJKZ9d3OVG3ZXQIUH0AzfAPilbLCIXVzUstG2MQ0HKKlS43Nb3Y3
-# LIU/Gs4m6Ri+kAewQ3+ViCCCcPDMyu/9KTVcH4k4Vfc3iosJocsL6TEa/y4ZXDlx
-# 4b6cpwoG1iZnt5LmTl/eeqxJzy6kdJKt2zyknIYf48FWGysj/4+16oh7cGvmoLr9
-# Oj9FpsToFpFSi0HASIRLlk2rREDjjfAVKM7t8RhWByovEMQMCGQ8M4+uKIw8y4+I
-# Cw2/O/TOHnuO77Xry7fwdxPm5yg/rBKupS8ibEH5glwVZsxsDsrFhsP2JjMMB0ug
-# 0wcCampAMEhLNKhRILutG4UI4lkNbcoFUCvqShyepf2gpx8GdOfy1lKQ/a+FSCH5
-# Vzu0nAPthkX0tGFuv2jiJmCG6sivqf6UHedjGzqGVnhOMIIGwjCCBKqgAwIBAgIQ
-# BUSv85SdCDmmv9s/X+VhFjANBgkqhkiG9w0BAQsFADBjMQswCQYDVQQGEwJVUzEX
-# MBUGA1UEChMORGlnaUNlcnQsIEluYy4xOzA5BgNVBAMTMkRpZ2lDZXJ0IFRydXN0
-# ZWQgRzQgUlNBNDA5NiBTSEEyNTYgVGltZVN0YW1waW5nIENBMB4XDTIzMDcxNDAw
-# MDAwMFoXDTM0MTAxMzIzNTk1OVowSDELMAkGA1UEBhMCVVMxFzAVBgNVBAoTDkRp
-# Z2lDZXJ0LCBJbmMuMSAwHgYDVQQDExdEaWdpQ2VydCBUaW1lc3RhbXAgMjAyMzCC
-# AiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAKNTRYcdg45brD5UsyPgz5/X
-# 5dLnXaEOCdwvSKOXejsqnGfcYhVYwamTEafNqrJq3RApih5iY2nTWJw1cb86l+uU
-# UI8cIOrHmjsvlmbjaedp/lvD1isgHMGXlLSlUIHyz8sHpjBoyoNC2vx/CSSUpIIa
-# 2mq62DvKXd4ZGIX7ReoNYWyd/nFexAaaPPDFLnkPG2ZS48jWPl/aQ9OE9dDH9kgt
-# XkV1lnX+3RChG4PBuOZSlbVH13gpOWvgeFmX40QrStWVzu8IF+qCZE3/I+PKhu60
-# pCFkcOvV5aDaY7Mu6QXuqvYk9R28mxyyt1/f8O52fTGZZUdVnUokL6wrl76f5P17
-# cz4y7lI0+9S769SgLDSb495uZBkHNwGRDxy1Uc2qTGaDiGhiu7xBG3gZbeTZD+BY
-# QfvYsSzhUa+0rRUGFOpiCBPTaR58ZE2dD9/O0V6MqqtQFcmzyrzXxDtoRKOlO0L9
-# c33u3Qr/eTQQfqZcClhMAD6FaXXHg2TWdc2PEnZWpST618RrIbroHzSYLzrqawGw
-# 9/sqhux7UjipmAmhcbJsca8+uG+W1eEQE/5hRwqM/vC2x9XH3mwk8L9CgsqgcT2c
-# kpMEtGlwJw1Pt7U20clfCKRwo+wK8REuZODLIivK8SgTIUlRfgZm0zu++uuRONhR
-# B8qUt+JQofM604qDy0B7AgMBAAGjggGLMIIBhzAOBgNVHQ8BAf8EBAMCB4AwDAYD
-# VR0TAQH/BAIwADAWBgNVHSUBAf8EDDAKBggrBgEFBQcDCDAgBgNVHSAEGTAXMAgG
-# BmeBDAEEAjALBglghkgBhv1sBwEwHwYDVR0jBBgwFoAUuhbZbU2FL3MpdpovdYxq
-# II+eyG8wHQYDVR0OBBYEFKW27xPn783QZKHVVqllMaPe1eNJMFoGA1UdHwRTMFEw
-# T6BNoEuGSWh0dHA6Ly9jcmwzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0ZWRH
-# NFJTQTQwOTZTSEEyNTZUaW1lU3RhbXBpbmdDQS5jcmwwgZAGCCsGAQUFBwEBBIGD
-# MIGAMCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5kaWdpY2VydC5jb20wWAYIKwYB
-# BQUHMAKGTGh0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0
-# ZWRHNFJTQTQwOTZTSEEyNTZUaW1lU3RhbXBpbmdDQS5jcnQwDQYJKoZIhvcNAQEL
-# BQADggIBAIEa1t6gqbWYF7xwjU+KPGic2CX/yyzkzepdIpLsjCICqbjPgKjZ5+PF
-# 7SaCinEvGN1Ott5s1+FgnCvt7T1IjrhrunxdvcJhN2hJd6PrkKoS1yeF844ektrC
-# QDifXcigLiV4JZ0qBXqEKZi2V3mP2yZWK7Dzp703DNiYdk9WuVLCtp04qYHnbUFc
-# jGnRuSvExnvPnPp44pMadqJpddNQ5EQSviANnqlE0PjlSXcIWiHFtM+YlRpUurm8
-# wWkZus8W8oM3NG6wQSbd3lqXTzON1I13fXVFoaVYJmoDRd7ZULVQjK9WvUzF4UbF
-# KNOt50MAcN7MmJ4ZiQPq1JE3701S88lgIcRWR+3aEUuMMsOI5ljitts++V+wQtaP
-# 4xeR0arAVeOGv6wnLEHQmjNKqDbUuXKWfpd5OEhfysLcPTLfddY2Z1qJ+Panx+VP
-# NTwAvb6cKmx5AdzaROY63jg7B145WPR8czFVoIARyxQMfq68/qTreWWqaNYiyjvr
-# moI1VygWy2nyMpqy0tg6uLFGhmu6F/3Ed2wVbK6rr3M66ElGt9V/zLY4wNjsHPW2
-# obhDLN9OTH0eaHDAdwrUAuBcYLso/zjlUlrWrBciI0707NMX+1Br/wd3H3GXREHJ
-# uEbTbDJ8WC9nR2XlG3O2mflrLAZG70Ee8PBf4NvZrZCARK+AEEGKMIIHyTCCBbGg
-# AwIBAgIQDMNw87U7UZ48Hv1za61jojANBgkqhkiG9w0BAQsFADBpMQswCQYDVQQG
-# EwJVUzEXMBUGA1UEChMORGlnaUNlcnQsIEluYy4xQTA/BgNVBAMTOERpZ2lDZXJ0
-# IFRydXN0ZWQgRzQgQ29kZSBTaWduaW5nIFJTQTQwOTYgU0hBMzg0IDIwMjEgQ0Ex
-# MB4XDTIzMDQwNzAwMDAwMFoXDTI2MDQzMDIzNTk1OVowgdExEzARBgsrBgEEAYI3
-# PAIBAxMCVVMxGTAXBgsrBgEEAYI3PAIBAhMIQ29sb3JhZG8xHTAbBgNVBA8MFFBy
-# aXZhdGUgT3JnYW5pemF0aW9uMRQwEgYDVQQFEwsyMDEzMTYzODMyNzELMAkGA1UE
-# BhMCVVMxETAPBgNVBAgTCENvbG9yYWRvMRQwEgYDVQQHEwtDYXN0bGUgUm9jazEZ
-# MBcGA1UEChMQUGF0Y2ggTXkgUEMsIExMQzEZMBcGA1UEAxMQUGF0Y2ggTXkgUEMs
-# IExMQzCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAKaQcs40YzBFv5HX
-# QFPd04rKJ4uBdwvAZLKuULy+icZOpgs/Sy329Ng5ikhB5o1IdvE2cOT20sjs3qgb
-# 4e+rqs7taTCe6RNLsDINsmcTlp4yxOfV80EZ08ld3o36GEgH0Vy1vrJXLTRKNULz
-# V7gIzF/e3tO1Fab4IxKZNcBSXiv8ORqcgT9O7/RZoqyG87iU6Q/dKfC4WzvU396X
-# J3FMZrI+s4CgV8p6pVNjijBjH7pmzoXynFtA0j6NH6tg4DmQvm+kfWXtWbDpPYhd
-# Fz1gccJt1DjTrJetpIwBzDAS8NGA75HQhBmQ3gcnNDJLgylB3HyWOeXS+vxXR0Pi
-# /W419cfn8zCFH0u2O4QFaZsT2HoIE/t9EhdAKdHoKwvVoCgwvlx3jjwFq5MnoB2o
-# JiNmTGQyhiRvCaw6JACKUa43eJvlRKylEy4INDTOX5BeivJoTqCw0cCAd6ZuRh6g
-# Rl8shIVfN78qunQqJZQkDimtQY5Sn33w+ee5/lFSxOxBg6iu7vCGPZ6QxJd6oVdR
-# a8t87vJ4QVlsMQQRa400S7kqIX1HOnbR3hxgvcks8kBRMYtZ8g3Fz/WTCW5sWbEx
-# Vpn6HC6DsRhosF/DBGYmIqQJz6odkCFCr7QcmpGjoZs4jRDegSC5utEusBYmvCfV
-# xtud3R43WEdCRfHuD1OFDm5HoonnAgMBAAGjggICMIIB/jAfBgNVHSMEGDAWgBRo
-# N+Drtjv4XxGG+/5hewiIZfROQjAdBgNVHQ4EFgQU3wgET0b7maQo7OF3wwGWm83h
-# l+0wDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMIG1BgNVHR8E
-# ga0wgaowU6BRoE+GTWh0dHA6Ly9jcmwzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRy
-# dXN0ZWRHNENvZGVTaWduaW5nUlNBNDA5NlNIQTM4NDIwMjFDQTEuY3JsMFOgUaBP
-# hk1odHRwOi8vY3JsNC5kaWdpY2VydC5jb20vRGlnaUNlcnRUcnVzdGVkRzRDb2Rl
-# U2lnbmluZ1JTQTQwOTZTSEEzODQyMDIxQ0ExLmNybDA9BgNVHSAENjA0MDIGBWeB
-# DAEDMCkwJwYIKwYBBQUHAgEWG2h0dHA6Ly93d3cuZGlnaWNlcnQuY29tL0NQUzCB
-# lAYIKwYBBQUHAQEEgYcwgYQwJAYIKwYBBQUHMAGGGGh0dHA6Ly9vY3NwLmRpZ2lj
-# ZXJ0LmNvbTBcBggrBgEFBQcwAoZQaHR0cDovL2NhY2VydHMuZGlnaWNlcnQuY29t
-# L0RpZ2lDZXJ0VHJ1c3RlZEc0Q29kZVNpZ25pbmdSU0E0MDk2U0hBMzg0MjAyMUNB
-# MS5jcnQwCQYDVR0TBAIwADANBgkqhkiG9w0BAQsFAAOCAgEADaIfBgYBzz7rZspA
-# w5OGKL7nt4eo6SMcS91NAex1HWxak4hX7yqQB25Oa66WaVBtd14rZxptoGQ88FDe
-# zI1qyUs4bwi4NaW9WBY8QDnGGhgyZ3aT3ZEBEvMWy6MFpzlyvjPBcWE5OGuoRMhP
-# 42TSMhvFlZGCPZy02PLUdGcTynL55YhdTcGJnX0Z2OgSaHUQTmXhgRX+fajIilPn
-# mmv8Av4Clr6Xa9SoNHltA04JRiCu4ejDGFqA94F696jSJ+AUYHys6bnPc0E8JB9Y
-# nFCAurPRG8YBJAofUtxnGIHGE0EiQTZeXf0nKmVBIXkE3hT4mZx7pH7wrlCr0FV4
-# qnq6j0uaj4oKqFbkdyzb5u+XQe9pPojshnjVzhIRK53wsGaFP4gSURxWvcThIOyo
-# aKrVDZOdLQZXEz8Anks3Vs5XscjyzFR7pv/3Reik7FaZRTvd5rDW6foDJOiCwX5p
-# +UnldHGHW83rDvtks1rwgKwuuxvCG3Bkjirl94EImpiugGaRQ7S2Lydxpqzv7Hng
-# 4YQbIIvVMNC7mNrVZPNWdF4/a9yjDt2nJrnRcDK1zvHBXSrAYIycQ6hhhlHS9Y4M
-# Rhz35t1du/Y0IXDB7HBYSvcsrpxtBzXLTd2NCNCtdkwYIl7WTQeoCbZWvo4PbzJB
-# OnPjs1tN4upe9XomxtZkNAwIOfMxggZTMIIGTwIBATB9MGkxCzAJBgNVBAYTAlVT
-# MRcwFQYDVQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1
-# c3RlZCBHNCBDb2RlIFNpZ25pbmcgUlNBNDA5NiBTSEEzODQgMjAyMSBDQTECEAzD
-# cPO1O1GePB79c2utY6IwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEK
-# MAigAoAAoQKAADAZBgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3
-# AgELMQ4wDAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg+cCyNOz3O2o4yskd
-# JYlanx1gVgW51nP3skvaMO1XZbQwDQYJKoZIhvcNAQEBBQAEggIAk8lK3BNIvRSW
-# yBJ3xTJvqmClb/Hl+gkMruCpt7rv3NHWC23nAZauStyu5vCc9AiqQ7NjKXG5hR1t
-# KyOojsCvTKfkgNa355ICLely4ZxKHnp72d73LG3wre17agTHJY5KU8XxbdfFxTfu
-# HfYX8Wc/bSngorCHmarVdJDX8lz4jB6R3OC3OacdPp61rD2ZLdRGPlVvVqyvNzuP
-# Oq2ABvDpm/PPjzOaLRhZUBMAOrlQXzOQ1B4Vb3tjzygOdFx0fGbNmNLcWT3nZyR1
-# H0pYfz1OTWtvoGMb8gVB1NtIz1hn/xnNmHqpfvMQyCIUl67muY4gqpOXA+fLtPa9
-# +GusCEhG8N/l38oauTmy50OFILZ9u634NgZszN2xJF4mMBUB6i/EvCO1lLZ9j0CJ
-# fTMnUOGy+/AaeQtEJN/gbigGt5L9s4qJvEYDyoJOE8B3MZo3QfUCba9vTVjH4i9O
-# 6QoLwbhGmpNPqwuL9kXENaCZ2tbYEF6ahEUCe9P2g2Tlbw9Qenafr+kgoyohAGIK
-# gHs5YYWXMSE/XnVVRDGHwi8dFTLw5WOSUYBhmOc3OsbD5Ul1F2hls0fBFtleZPOY
-# 3tMp/SkZa3FjaYuKUZiolNRFvkDZzZl4m8saq/pWEP23RqLyfbYzzVEilbAHC2W5
-# IZtwqsIfng8OLWMKKWKhAp5BoYxMNKGhggMgMIIDHAYJKoZIhvcNAQkGMYIDDTCC
-# AwkCAQEwdzBjMQswCQYDVQQGEwJVUzEXMBUGA1UEChMORGlnaUNlcnQsIEluYy4x
-# OzA5BgNVBAMTMkRpZ2lDZXJ0IFRydXN0ZWQgRzQgUlNBNDA5NiBTSEEyNTYgVGlt
-# ZVN0YW1waW5nIENBAhAFRK/zlJ0IOaa/2z9f5WEWMA0GCWCGSAFlAwQCAQUAoGkw
-# GAYJKoZIhvcNAQkDMQsGCSqGSIb3DQEHATAcBgkqhkiG9w0BCQUxDxcNMjQwODEy
-# MTU0NTU3WjAvBgkqhkiG9w0BCQQxIgQgb8b7eb6m9wdhuy5VsFJ5io8N0ZdgHH5d
-# 96vXygF0WPkwDQYJKoZIhvcNAQEBBQAEggIAeterVbEmQfv8FFBo8IbVlAoJ3R4G
-# s+Ee2deLvMJjaZD3/qpYPKdNGjxSPSaOK4UYYKpTP+CrNwesJBWevDwjNJ8xWJz3
-# nVdKfuJ166Z/ozxgX7O/Orlpf+mgQirg+mI90XzhXOi5xwcmptgLv/Jaz/hIrvHL
-# B/L/ieSIftj4+5ESFAKKXlbVHdhq9kVNIYnl6yOj4VbBYqACPJ8l14UHNzw85D+3
-# AfD01EjXg/6FQgWnV46B3RAFSTSgm3a3z68TeTmTrQt+HADr3tWt2DfZ589H7Z98
-# gv31jky0SomMr+GjwGuPnLsSMEG4dmINlWopTVP/gP+kwIHPYkZGkIlPZE0glEc3
-# vDL8vQptRQZhoXpWYRS4ug9f+ZDhcJCL38zToFFT+jIyE6cl1W/knZVoIrmu1D6A
-# Y6qSkLRaX3Ho6yTiqPT40EgjSLd63r84kXBUKQH1OGB3myt86yn1gF7Wt7ocUnQS
-# u6+eqb9k8CD+dsam+EpZBG5pAzeFn4MKnLbfxLf+AkVrU/DypbVLN88V4Vzf/Rou
-# izao2Sfh4KnSefC4Ixicg93iL1wyCMZoG8iQIU/XOmPFBhXysGmrsq2sEp4Pebga
-# RTnouL2lRou3aIum2/qUCvzHOyCtTWI5h2ELS6a6fqT50OgWIFtv01CZpEmkE1eH
-# 4EyCeoQSXkM90Ns=
-# SIG # End signature block
