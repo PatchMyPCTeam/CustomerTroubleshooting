@@ -146,34 +146,39 @@ try {
                 $sanitizedEntries += $entry
             }
         }
+        #Write-Host $sanitizedEntries -ForegroundColor Green
 
         if ($sanitizedEntries.Count -eq 0) {
             throw "No results found in this log file for the specified win32AppID: $win32AppID"
         }
-
+        
         $results = @()
         $forWin32AppFastRetryDeleteThis = @()
 
         # ... loop through the sanitized entries and extract the relevant information...
-        foreach ($entry in $sanitizedEntries) {
-            if ($entry -match "Found GRS value: (\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2}) at key (.+)") {
-                $lastInstallAttempt = [datetime]::ParseExact($matches[1], "MM/dd/yyyy HH:mm:ss", $null)
-                $rawRegistryKey = $matches[2]
-                $formattedRegistryKey = $rawRegistryKey -replace "=.*", "="
-                $registryKeyToDelete = "HKLM:\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps\$formattedRegistryKey"
+        # Find the latest entry based on the date and time
+        $latestEntry = $sanitizedEntries |
+        Where-Object { $_ -match "Found GRS value: (\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2}) at key (.+)" } |
+        Sort-Object { [datetime]::ParseExact($matches[1], "MM/dd/yyyy HH:mm:ss", $null) } -Descending |
+        Select-Object -First 1
 
-                $retryStart = $lastInstallAttempt.AddHours(24)
-                $retryEnd = $lastInstallAttempt.AddHours(30)
+        if ($latestEntry -match "Found GRS value: (\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2}) at key (.+)") {
+        $lastInstallAttempt = [datetime]::ParseExact($matches[1], "MM/dd/yyyy HH:mm:ss", $null)
+        $rawRegistryKey = $matches[2]
+        $formattedRegistryKey = $rawRegistryKey -replace "=.*", "="
+        $registryKeyToDelete = "HKLM:\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps\$formattedRegistryKey"
 
-                $results += [PSCustomObject]@{
-                    'Last Install Attempt (UTC)' = $lastInstallAttempt
-                    'Retry Window (UTC) - 24 to 30 hours later' = "After $($retryStart.ToString('MM/dd/yyyy HH:mm:ss')) OR $($retryEnd.ToString('MM/dd/yyyy HH:mm:ss'))"
-                }
+        $retryStart = $lastInstallAttempt.AddHours(24)
+        $retryEnd = $lastInstallAttempt.AddHours(30)
 
-                $forWin32AppFastRetryDeleteThis += [PSCustomObject]@{
-                    'Registry Key to delete and restart IME service for fast install retry' = $registryKeyToDelete
-                }
-            }
+        $results += [PSCustomObject]@{
+            'Last Install Attempt (UTC)' = $lastInstallAttempt
+            'Retry Window (UTC) - 24 to 30 hours later' = "After $($retryStart.ToString('MM/dd/yyyy HH:mm:ss')) OR $($retryEnd.ToString('MM/dd/yyyy HH:mm:ss'))"
+        }
+
+        $forWin32AppFastRetryDeleteThis += [PSCustomObject]@{
+            'Registry Key to delete and restart IME service for fast install retry' = $registryKeyToDelete
+        }
         }
 
         # ... show the results in a table format...
