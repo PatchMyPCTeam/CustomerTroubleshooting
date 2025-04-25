@@ -96,15 +96,25 @@ try {
     if ($getWin32AppPolicies) {
         [string]$pattern = '<!\[LOG\[Get policies = \[(.*?)\]\]'
 
-        $myPolicyMatches = [regex]::Matches($content, $pattern)
+        [array]$myPolicyMatches = [regex]::Matches($content, $pattern)
 
         if ($myPolicyMatches.Count -eq 0) {
             throw "No win32 policy matches found in this log file"
         }
-        
+
         # ... grab the most recent match...
-        $mostRecentMatch = $myPolicyMatches | Sort-Object { $_.Index } -Descending | Select-Object -First 1
-        $mostRecentPolicy = $mostRecentMatch.Value -replace '^<!\[LOG\[Get policies = ', '' -replace '\]\]$', ']'
+        # added additional logic to ensure we get the most recent policy match WITH data in it.
+        $mostRecentPolicy = $null
+        foreach ($match in ($myPolicyMatches | Sort-Object { $_.Index } -Descending)) {
+            $mostRecentPolicy = $match.Value -replace '^<!\[LOG\[Get policies = ', '' -replace '\]\]$', ']'
+            if (-not [string]::IsNullOrWhiteSpace($mostRecentPolicy) -and $mostRecentPolicy -ne '[]') {
+                break
+            }
+        }
+
+        if (-not $mostRecentPolicy) {
+            throw "No valid policy found in the log file"
+        }
 
         $myWin32AppsInPolicy = $mostRecentPolicy | ConvertFrom-Json -ErrorAction Stop
         $filteredApps = $myWin32AppsInPolicy | Where-Object { $_.Name -like "*$appNameToSearchFor*" }
@@ -195,6 +205,7 @@ try {
         if ($espPolicyMatches.Count -eq 0) {
             throw "No win32 policy matches found in this log file"
         }
+
     
         $espSanitizedEntries = @()
         foreach ($match in $espPolicyMatches) {
@@ -203,6 +214,8 @@ try {
                 # Sanitize the entry and add it to the array
                 $entry = $match.Value -replace '^\<\!\[LOG\[\[Win32App\]\[EspManager\]', ''
                 $espSanitizedEntries += $entry
+            }else{
+                throw "No apps found in the ESP phase in this log file"
             }
         }
     
