@@ -17,6 +17,12 @@ Switch to retrieve all Win32 App policies from the log file. Use this with the o
 .PARAMETER appNameToSearchFor
 (Optional) The name of the app to filter the Win32 App policies. Used with the `getWin32AppPolicies` parameter.
 
+.PARAMETER DetectionScript
+Switch to include detection script information in the output when retrieving Win32 App policies. Used with the `getWin32AppPolicies` parameter.
+
+.PARAMETER OutGridView
+Switch to display the output in an Out-GridView window when retrieving Win32 App policies. Used with the `getWin32AppPolicies` parameter.
+
 .PARAMETER getWin32AppGRSinfo
 Switch to retrieve GRS (Global Retry Schedule) details for a specific Win32 App ID. Requires the `win32AppID` parameter.
 
@@ -31,6 +37,10 @@ Switch to retrieve ESP (Enrollment Status Page) profile information from the log
 .EXAMPLE
 .\Get-AppWorkloadDetails.ps1 -logFilePath "C:\Logs\AppWorkload.log" -getWin32AppPolicies -appNameToSearchFor "Chrome"
 Retrieves Win32 App policies from the specified log file and filters the results for apps with names containing "Chrome".
+
+.EXAMPLE
+.\Get-AppWorkloadDetails.ps1 -logFilePath "C:\Logs\AppWorkload.log" -getWin32AppPolicies -appNameToSearchFor "Office" -DetectionScript -OutGridView
+Retrieves Win32 App policies for apps with names containing "Office", includes detection script information, and displays the results in an Out-GridView window.
 
 .EXAMPLE
 .\Get-AppWorkloadDetails.ps1 -logFilePath "C:\Logs\AppWorkload-20250314-191451.log" -getWin32AppGRSinfo -win32AppID "09da002a-e50f-459d-8364-b4f8fe012bc3"
@@ -58,6 +68,12 @@ param (
     [Parameter(Mandatory=$false, ParameterSetName="GetWin32AppPolicies")]
     [string]$appNameToSearchFor,
 
+    [Parameter(Mandatory=$false, ParameterSetName="GetWin32AppPolicies")]
+    [switch]$DetectionScript,
+
+    [Parameter(Mandatory=$false, ParameterSetName="GetWin32AppPolicies")]
+    [switch]$OutGridView,
+
     # Params for getting Win32App GRS info
     [Parameter(Mandatory=$true, ParameterSetName="Win32AppGRSinfo")]
     [switch]$getWin32AppGRSinfo,
@@ -80,6 +96,49 @@ function Test-GUID {
     } else {
         return $false
     }
+}
+
+function Get-DetectionScriptInfo {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$ScriptContent
+    )
+    
+    try {
+        # Convert Content from Json
+        $DetectionScriptValue = ($ScriptContent | ConvertFrom-Json -ErrorAction SilentlyContinue)
+        
+        # Check Detection is a Script
+        if ($DetectionScriptValue.DetectionType -eq 3) {
+            # Extract Script Body
+            $DetectionScriptValue = (ConvertFrom-Json ($DetectionScriptValue.DetectionText) | Select-Object -ExpandProperty ScriptBody -ErrorAction SilentlyContinue)
+            # Decode Base64
+            $DetectionScriptValue = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($DetectionScriptValue))
+
+            # Check Script Signature for Signer (CN)
+            if ($DetectionScriptValue -match '# SIG # Begin signature block') {
+                # Convert the detection script string to byte array for Get-AuthenticodeSignature
+                $DetectionScriptSigner = ((Get-AuthenticodeSignature -Content $([System.Text.Encoding]::UTF8.GetBytes($DetectionScriptValue)) -SourcePathOrExtension ".ps1" | Select-Object *).SignerCertificate.Subject -split ',')[0]
+            }
+            else {
+                $DetectionScriptSigner = 'Not Signed'
+            }
+        }
+        else {
+            $DetectionScriptValue = 'Not a Script'
+            $DetectionScriptSigner = 'N/A'
+        }
+    }
+    catch {
+        # Catch any errors during detection script processing
+        $DetectionScriptValue = 'Error'
+        $DetectionScriptSigner = 'Error'
+    }
+
+    return [PSCustomObject]@{
+            DetectionScript = $DetectionScriptValue
+            DetectionSigner = $DetectionScriptSigner
+        }
 }
 
 [string] $ErrorActionPreference = 'Stop'
@@ -122,19 +181,52 @@ try {
         if (-not $filteredApps) {
             throw "No results found for the specified app name: $appNameToSearchFor"
         }
-        
-        # ... show the filtered apps in a table format...
-        $filteredApps | Select-Object `
-            @{Name='Win32 app ID'; Expression={$_.ID}}, `
-            @{Name='Win32 app Name'; Expression={$_.Name}}, `
-            @{Name='Revision'; Expression={$_.Version}}, `
-            @{Name='Intent'; Expression={if ($_.Intent -eq '0') { 'NotTargeted' } elseif ($_.Intent -eq '1') { 'Available' } elseif ($_.Intent -eq '3')  { 'Required' } elseif ($_.Intent -eq '4') { 'Uninstall'} else { 'unknown' }}}, `
-            @{Name='TimeFormat'; Expression={$_.StartDeadlineEx.TimeFormat}}, `
-            @{Name='StartTime'; Expression={if ($_.StartDeadlineEx.StartTime -eq '1/1/0001 12:00:00 AM') { 'ASAP' } else { $_.StartDeadlineEx.StartTime }}}, `
-            @{Name='Deadline'; Expression={if ($_.StartDeadlineEx.Deadline -eq '1/1/0001 12:00:00 AM') { 'ASAP' } else { $_.StartDeadlineEx.Deadline }}}, `
-            @{Name='InstallContext'; Expression={if ($_.InstallContext -eq '0') { 'User' } else { 'System' }}} | 
-            Sort-Object 'Win32 app Name' | 
-            Format-Table -AutoSize
+
+        # Start Building PSCustomObject
+        [Collections.Generic.List[PSCustomObject]]$PolicyApps = @()
+
+        # Loop through the filteredApps
+        foreach ($App in $filteredApps) {
+            $App | ForEach-Object {
+                # Create a PSCustomObject for each App
+                $filteredAppsCustObj = [PSCustomObject]@{
+                    'Win32 app ID'   = $_.ID
+                    'Win32 app Name' = $_.Name
+                    'Revision'       = $_.Version
+                    'Intent'         = switch ($_.Intent) {
+                        0 { 'Not Targeted' }
+                        1 { 'Available' }
+                        3 { 'Required' }
+                        4 { 'Uninstall' }
+                        Default { $_.Intent }
+                    }
+                    'TimeFormat'     = $_.StartDeadlineEx.TimeFormat
+                    StartTime        = if ($_.StartDeadlineEx.StartTime -eq '1/1/0001 12:00:00 AM') { 'ASAP' } else { $_.StartDeadlineEx.StartTime }
+                    Deadline         = if ($_.StartDeadlineEx.Deadline -eq '1/1/0001 12:00:00 AM') { 'ASAP' } else { $_.StartDeadlineEx.Deadline }
+                    InstallContext   = switch ((ConvertFrom-Json $_.InstallEx).RunAs) {
+                        0 { 'USER' }
+                        1 { 'SYSTEM' }
+                        Default { $InstallEx.RunAs }
+                    }
+                }
+
+                # Add Detection Information
+                if ($DetectionScript){
+                    $filteredAppsCustObj | Add-Member -MemberType NoteProperty -Name 'DetectionSigner' -Value $(if ($_.DetectionRule){(Get-DetectionScriptInfo -ScriptContent $_.DetectionRule)}).DetectionSigner
+                    $filteredAppsCustObj | Add-Member -MemberType NoteProperty -Name 'DetectionScript' -Value $(if ($_.DetectionRule){(Get-DetectionScriptInfo -ScriptContent $_.DetectionRule)}).DetectionScript
+                }
+            }
+            
+            # Add PSCustomObject to List
+            $PolicyApps.Add($filteredAppsCustObj)
+        }
+        # Output
+        if ($OutGridView) {
+            $PolicyApps | Sort-Object 'Win32 app Name' | Out-GridView -Title "AppWorkload Policies [Total Records: $($PolicyApps.Count)]" -OutputMode Single
+        }
+        else {
+            $PolicyApps | Sort-Object 'Win32 app Name' | Format-Table -AutoSize
+        }
     }
 
     # If we're looking for GRS info....
