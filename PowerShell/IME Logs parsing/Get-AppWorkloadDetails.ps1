@@ -236,56 +236,55 @@ try {
             throw "The win32AppID is not in the correct format."
         }
 
+        # GRS Line Pattern
         [string]$grsPattern = '<!\[LOG\[\[Win32App\]\[GRSManager\].*'
-        $myGRSMatches = [regex]::Matches($content, $grsPattern)
 
-        $sanitizedEntries = @()
+        # Search for GRS Info
+        $GRSInfoMatches = Select-String -Path "$($logFilePath)" -Pattern $grsPattern
 
-        # ... sanitize the entries to remove the prefix and filter by win32AppID...
-        foreach ($match in $myGRSMatches) {
-            $entry = $match -replace '^\<\!\[LOG\[\[Win32App\]\[GRSManager\] ', ''
-            If ($entry -like "*$win32AppID*") {
-                $sanitizedEntries += $entry
+        # GRS App ID Pattern
+        [string]$grsAppIdPattern = 'Found GRS value: (\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2}) at key (.+)'
+
+        # Find all the entries with the AppID and the GRS Pattern
+        $GRSInfoMatches = $GRSInfoMatches | Where-Object { $_ -match "$($win32AppID)" } | Where-Object { $_ -match $grsAppIdPattern }
+
+        # Build a Sortable List to find the latest entry
+        [Collections.Generic.List[PSCustomObject]]$EntryObjects = @()
+        foreach ($Entry in $GRSInfoMatches) {
+            # Build a custom object with the info
+            $GRSInfoObject = [PSCustomObject]@{
+                'DateTime' = [datetime]::ParseExact(([regex]::Matches($Entry, '(\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2})')).Value, "MM/dd/yyyy HH:mm:ss", $null)
+                'LineData' = $Entry
             }
+            # Add to List
+            $EntryObjects.Add($GRSInfoObject)
         }
-        #Write-Host $sanitizedEntries -ForegroundColor Green
 
-        if ($sanitizedEntries.Count -eq 0) {
+        # Get the latest entry by DateTime
+        $LatestEntry = $EntryObjects | Sort-Object DateTime | Select-Object -Last 1
+
+        # Check if we found an entry
+        if ($LatestEntry.Count -ne 0) {
+            # Get RegistryKey and Ensure we are matching on the LatestEntry LineData 
+            $formattedRegistryKey = (($LatestEntry.LineData.ToString() | Select-String -Pattern $grsAppIdPattern).Matches.Groups[2].Value) -replace '=.*', '='
+            $registryKeyToDelete = "HKLM:\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps\$formattedRegistryKey"
+
+            # Build the Output Objects
+            $GRSInformationTime = $null
+            $GRSInformationTime = [PSCustomObject]@{
+                'Last Install Attempt (UTC)'                = $LatestEntry.DateTime
+                'Retry Window (UTC) - 24 to 30 hours later' = "After $($($LatestEntry.DateTime.AddHours(24)).ToString('MM/dd/yyyy HH:mm:ss')) OR $($($LatestEntry.DateTime.AddHours(30)).ToString('MM/dd/yyyy HH:mm:ss'))"
+            }
+            $GRSInformationKey = [PSCustomObject]@{
+                'Registry Key to delete and restart IME service for fast install retry' = $registryKeyToDelete
+            }
+            
+            # ... show the results in a table format...
+            $GRSInformationTime | Format-Table -AutoSize
+            $GRSInformationKey | Format-Table -AutoSize
+        } else {
             throw "No results found in this log file for the specified win32AppID: $win32AppID"
         }
-        
-        $results = @()
-        $forWin32AppFastRetryDeleteThis = @()
-
-        # ... loop through the sanitized entries and extract the relevant information...
-        # Find the latest entry based on the date and time
-        $latestEntry = $sanitizedEntries |
-        Where-Object { $_ -match "Found GRS value: (\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2}) at key (.+)" } |
-        Sort-Object { [datetime]::ParseExact($matches[1], "MM/dd/yyyy HH:mm:ss", $null) } -Descending |
-        Select-Object -First 1
-
-        if ($latestEntry -match "Found GRS value: (\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2}) at key (.+)") {
-        $lastInstallAttempt = [datetime]::ParseExact($matches[1], "MM/dd/yyyy HH:mm:ss", $null)
-        $rawRegistryKey = $matches[2]
-        $formattedRegistryKey = $rawRegistryKey -replace "=.*", "="
-        $registryKeyToDelete = "HKLM:\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps\$formattedRegistryKey"
-
-        $retryStart = $lastInstallAttempt.AddHours(24)
-        $retryEnd = $lastInstallAttempt.AddHours(30)
-
-        $results += [PSCustomObject]@{
-            'Last Install Attempt (UTC)' = $lastInstallAttempt
-            'Retry Window (UTC) - 24 to 30 hours later' = "After $($retryStart.ToString('MM/dd/yyyy HH:mm:ss')) OR $($retryEnd.ToString('MM/dd/yyyy HH:mm:ss'))"
-        }
-
-        $forWin32AppFastRetryDeleteThis += [PSCustomObject]@{
-            'Registry Key to delete and restart IME service for fast install retry' = $registryKeyToDelete
-        }
-        }
-
-        # ... show the results in a table format...
-        $results | Format-Table -AutoSize
-        $forWin32AppFastRetryDeleteThis | Format-Table -AutoSize
     }
 
     # If we're looking for ESP profile info....
