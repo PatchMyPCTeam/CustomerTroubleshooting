@@ -291,56 +291,48 @@ try {
     # If we're looking for ESP profile info....
     # ... check if the log file contains ESP profile information and throw an error if it doesn't...
     if ($getESPprofileInfo) {
-        [string]$espLogPattern = '<!\[LOG\[\[Win32App\]\[EspManager\].*'
-        $espPolicyMatches = [regex]::Matches($content, $espLogPattern)
-    
-        if ($espPolicyMatches.Count -eq 0) {
-            throw "No win32 policy matches found in this log file"
-        }
+        # ESP Pattern
+        [string]$espLogPattern = '^\<\!\[LOG\[\[Win32App\]\[EspManager\] In EspPhase'
 
-    
-        $espSanitizedEntries = @()
-        foreach ($match in $espPolicyMatches) {
-            # If statement is needed, otherwise it will capture other, irellevent entries that are similar in format
-            if ($match.Value -match '^\<\!\[LOG\[\[Win32App\]\[EspManager\] In EspPhase') {
-                # Sanitize the entry and add it to the array
-                $entry = $match.Value -replace '^\<\!\[LOG\[\[Win32App\]\[EspManager\]', ''
-                $espSanitizedEntries += $entry
-            }else{
-                throw "No apps found in the ESP phase in this log file"
-            }
-        }
-    
-        $espResults = @()
-        #Write-Host $espSanitizedEntries -ForegroundColor Green
-    
-        foreach ($entry in $espSanitizedEntries) {
-            # Get the EspPhase
-            if ($entry -match "In EspPhase: ([^\.]+)\.") {
-                $espPhase = $matches[1]
-            }
-    
-            # Get the ID
-            if ($entry -match "\. App ([^ ]+) has been registered for user") {
-                $id = $matches[1]
-            }
-    
-            # Get the app name(s) from the log line matching the regex
-            if ($entry -match "\. App name: (.+?)\]LOG") {
-                $softwareName = $matches[1]
-            }
-    
-            # Add the found details to the results array
-            $espResults += [PSCustomObject]@{
-                'EspPhase'      = $espPhase
-                'ID'            = $id
-                'Software Name' = $softwareName
-            }
-        }
+        # Search Log File(s) for the Pattern
+        $PatternMatches = $null
+        $PatternMatches = Select-String -Path "$($logFilePath)" -Pattern $espLogPattern
 
-        #Write-Host $espResults -ForegroundColor Green
-
-        $espResults | Format-Table -AutoSize
+        # Build a List to find the latest entry
+        [Collections.Generic.List[PSCustomObject]]$espAppEntries = @()
+        foreach ($Entry in $PatternMatches) {
+            # Esp App Info Pattern
+            [string]$espAppInfoPattern = 'In EspPhase: ([^\.]+)\. App ([0-9a-zA-Z]{8}-[0-9a-zA-Z]{4}-[0-9a-zA-Z]{4}-[0-9a-zA-Z]{4}-[0-9a-zA-Z]{12})([^\.]+)([0-9a-zA-Z]{8}-[0-9a-zA-Z]{4}-[0-9a-zA-Z]{4}-[0-9a-zA-Z]{4}-[0-9a-zA-Z]{12})?\. App name: (.+?)\]LOG'
+            # Esp App Info Match
+            $espAppInfo = $($Entry.ToString() | Select-String -Pattern $espAppInfoPattern).Matches.Groups
+            # Check for Account Setup
+            if ($espAppInfo[3].Value -match 'user') {
+                # User ID Pattern
+                [string]$UserIDPattern = '[0-9a-zA-Z]{8}-[0-9a-zA-Z]{4}-[0-9a-zA-Z]{4}-[0-9a-zA-Z]{4}-[0-9a-zA-Z]{12}'
+                # Grab the User ID
+                $UserID = $($espAppInfo[3].Value | Select-String -Pattern $UserIDPattern).Matches.Value
+            }
+            else {
+                $UserID = 'N/A'
+            }
+            # Build a PSCustomObject with the Info
+            $espApp = [PSCustomObject]@{
+                'EspPhase' = $espAppInfo[1].Value
+                'User ID'  = $UserID
+                'App ID'   = $espAppInfo[2].Value
+                'App Name' = $espAppInfo[5].Value
+            }
+            # Add PSCustomObject to List
+            $espAppEntries.Add($espApp)
+        }
+        # Check entries were found
+        if ($espAppEntries.Count -eq 0) {
+            Write-Host -ForegroundColor Yellow "[$(Get-Date -format G)] No ESP App Entries Found"
+        }
+        else {
+            # Display the results
+            $espAppEntries | Format-Table -AutoSize
+        }
     }
 } catch {
     Write-Host $($_.Exception.Message) -ForegroundColor Red
