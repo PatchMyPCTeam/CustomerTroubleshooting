@@ -203,10 +203,10 @@ try {
                     'TimeFormat'     = $_.StartDeadlineEx.TimeFormat
                     StartTime        = if ($_.StartDeadlineEx.StartTime -eq '1/1/0001 12:00:00 AM') { 'ASAP' } else { $_.StartDeadlineEx.StartTime }
                     Deadline         = if ($_.StartDeadlineEx.Deadline -eq '1/1/0001 12:00:00 AM') { 'ASAP' } else { $_.StartDeadlineEx.Deadline }
-                    InstallContext   = switch ((ConvertFrom-Json $_.InstallEx).RunAs) {
+                    InstallContext   = switch (($_.InstallEx | ConvertFrom-Json -ErrorAction SilentlyContinue).RunAs) {
                         0 { 'USER' }
                         1 { 'SYSTEM' }
-                        Default { $InstallEx.RunAs }
+                        Default { ($_.InstallEx | ConvertFrom-Json -ErrorAction SilentlyContinue).RunAs }
                     }
                 }
 
