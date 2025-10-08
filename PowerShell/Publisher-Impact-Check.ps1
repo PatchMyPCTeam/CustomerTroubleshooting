@@ -258,8 +258,6 @@ function Test-Scenario3 {
         }
     }
 
-    Write-Log -Message ('Test-Scenario3: Product Ids: {0}' -f ([array]$Result.Keys | ConvertTo-Json))
-
     # count the number of $true values in $Result.value, and if more than 90% are $true, then return $true
     # if there are 10 or fewer and all are $true, return $true
     # otherwise return $false
@@ -271,12 +269,14 @@ function Test-Scenario3 {
         if ($PercentageTrue -ge $Threshold) {
             Write-Log -Message ('Test-Scenario3: Impacted. {0}% of products with the same ProductId in both Intune Apps and Intune Updates tabs have identical right-click options configuration.' -f 
                             [math]::Round($PercentageTrue,2))
+            Write-Log -Message ('Test-Scenario3: Product Ids: {0}' -f ($Result.Keys | ConvertTo-Json))
             return $true
         }
     }
     elseif ($Result.Values -notcontains $false) {
         Write-Log -Message ('Test-Scenario3: Impacted. Found {0} products exceed the threshold with the same ProductId in both Intune Apps and Intune Updates tabs with identical right-click options configuration.' -f 
                         $TrueCount)
+        Write-Log -Message ('Test-Scenario3: Product Ids: {0}' -f ($Result.Keys | ConvertTo-Json))
         return $true
 
     }
@@ -297,18 +297,28 @@ function Test-Scenario4 {
 
     Write-Log -Message 'Test-Scenario4: Check if any product has a tab-specific XML element in the incorrect tab. For example, if any Intune Update has an Available assignment or IntuneAppEspIDs.'
 
-    if ($Settings.Updates.SearchPattern.IntuneAssignments.IntuneAssignment.Intent -contains 'available') {
-        Write-Log -Message 'Test-Scenario4: Impacted. At least one Intune Update has an Available assignment.'
-        return $true
-    }
-    
     if ($Settings.DefaultOptions.Options.Where{$_.target -eq 'Intune Updates'}.Vendor.IntuneAssignments.IntuneAssignment.Intent -contains 'available') {
         Write-Log -Message 'Test-Scenario4: Impacted. Intune Updates DefaultOptions has an Available assignment.'
         return $true
     }
 
-    if (-not [String]::IsNullOrWhiteSpace($Settings.Updates.SearchPattern.IntuneAppEspIDs)) {
+    $UpdatesWithAvailableAssignment = $Settings.Updates.SearchPattern.Where{
+        $_.IntuneAssignments.IntuneAssignment.Intent -contains 'available'
+    }.ProductId
+
+    if (-not [String]::IsNullOrWhiteSpace($UpdatesWithAvailableAssignment)) {
+        Write-Log -Message 'Test-Scenario4: Impacted. At least one Intune Update has an Available assignment.'
+        Write-Log -Message ('Test-Scenario4: Product Ids: {0}' -f ($UpdatesWithAvailableAssignment | ConvertTo-Json))
+        return $true
+    }
+
+    $UpdatesWithEspIds = $Settings.Updates.SearchPattern.Where{
+        -not [String]::IsNullOrWhiteSpace($_.IntuneAppEspIDs)
+    }.ProductId
+
+    if (-not [String]::IsNullOrWhiteSpace($UpdatesWithEspIds)) {
         Write-Log -Message 'Test-Scenario4: Impacted. At least one Intune Update has IntuneAppEspIDs configured.'
+        Write-Log -Message ('Test-Scenario4: Product Ids: {0}' -f ($UpdatesWithEspIds | ConvertTo-Json))
         return $true
     }
 
@@ -486,22 +496,47 @@ function Test-Scenario5 {
         'ec014f48-7b7f-4b87-b2a9-14f3814eaebd'  # Sysmon (x64)
     )
 
-    foreach ($Product in $Settings.Updates.SearchPattern) {
+    $IntuneUpdates = foreach ($Product in $Settings.Updates.SearchPattern) {
         if ($AppOnlyProductIds -contains $Product.ProductId) {
-            Write-Log -Message 'Test-Scenario5: Impacted. At least one App-only product appears in Intune Updates.'
-            return $true
+            $Product.ProductId
         }
     }
 
-    foreach ($Product in $Settings.Applications.SearchPattern) {
+    $IntuneApps = foreach ($Product in $Settings.Applications.SearchPattern) {
         if ($UpdateOnlyProductIds -contains $Product.ProductId) {
-            Write-Log -Message 'Test-Scenario5: Impacted. At least one Update-only product appears in Intune Apps.'
-            return $true
+            $Product.ProductId
         }
     }
 
-    Write-Log -Message 'Test-Scenario5: Not impacted. No App-only products appear in Intune Updates, and no Update-only products appear in Intune Apps.'
-    return $false
+    if ([array]$IntuneUpdates.Count -gt 0 -or [array]$IntuneApps.Count -gt 0) {
+        Write-Log -Message ('Test-Scenario5: Impacted. Product Ids in Intune Updates: {0}' -f ($IntuneUpdates | ConvertTo-Json))
+        Write-Log -Message ('Test-Scenario5: Impacted. Product Ids in Intune Apps: {0}' -f ($IntuneApps | ConvertTo-Json))
+        return $true
+    }
+    else {
+        Write-Log -Message 'Test-Scenario5: Not impacted. No App-only products appear in Intune Updates, and no Update-only products appear in Intune Apps.'
+        return $false
+    }
+}
+
+function Test-Scenario {
+    param(
+        [Int]$Id,
+        [System.Xml.XmlElement]$Settings
+    )
+
+    switch ($Id) {
+        1 { return (Test-Scenario1) }
+        2 { return (Test-Scenario2 -Settings $Settings) }
+        3 { return (Test-Scenario3 -Settings $Settings) }
+        4 { return (Test-Scenario4 -Settings $Settings) }
+        5 { return (Test-Scenario5 -Settings $Settings) }
+        default {
+            $Message = 'Invalid scenario id {0} specified' -f $Id
+            Write-Log -Message $Message
+            throw $Message
+        }
+    }
 }
 
 function Write-Result {
@@ -598,7 +633,7 @@ else {
 
 Write-Log -Message 'Beginning scenario tests'
 
-$BackupRestoreDate = Test-Scenario1
+$BackupRestoreDate = Test-Scenario -Id 1
 
 if ($BackupRestoreDate -eq $false) {
     Write-Result -Impacted 'No' -Scenario 1 -Advice 'No action required'
@@ -629,35 +664,30 @@ else {
 }
 
 foreach ($Tenant in $Settings.Tenant) {
-
     # If either the Intune Apps or Intune Updates tabs are disabled, skip this tenant
     # or if there are no products enabled in at least one tab, skip this tenant
     # i.e. only process tenants where both tabs are enabled and have products selected in both tabs
     if (
         ($Tenant.EnableApplications -ne 'True' -and $Tenant.EnableUpdates -ne 'True') -or
-        ([String]::IsNullOrWhiteSpace($Tenant.Applications) -and [String]::IsNullOrWhiteSpace($Tenant.Updates))
+        ([String]::IsNullOrWhiteSpace($Tenant.Applications) -or [String]::IsNullOrWhiteSpace($Tenant.Updates))
     ) {
+        Write-Log -Message ('Skipping tenant "{0}" because either Intune Apps and Intune Updates are disabled or have no products selected' -f $Tenant.Name)
         continue
     }
+    else {
+        Write-Log -Message ('Processing tenant: {0}' -f $Tenant.Name)
+    }
 
-    if (Test-Scenario2 -Settings $Tenant) {c
+    $Result = foreach ($ScenarioId in 2..5) {
+        Test-Scenario -Id $ScenarioId -Settings $Tenant
+    }
+
+    if ($Result -contains $true) {
         Write-Result -Impacted 'Yes' @WriteResultParams
         return
     }
-
-    if (Test-Scenario3 -Settings $Tenant) {
-        Write-Result -Impacted 'Yes' @WriteResultParams
-        return
-    }
-
-    if (Test-Scenario4 -Settings $Tenant) {
-        Write-Result -Impacted 'Yes' @WriteResultParams
-        return
-    }
-
-    if (Test-Scenario5 -Settings $Tenant) {
-        Write-Result -Impacted 'Yes' @WriteResultParams
-        return
+    else {
+        Write-Log -Message ('Tenant "{0}" not impacted' -f $Tenant.Name)
     }
 }
 
