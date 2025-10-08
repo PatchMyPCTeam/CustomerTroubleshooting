@@ -60,7 +60,6 @@ function Get-InstalledSoftware {
             continue
         }
 
-        Write-Verbose ('Found matching application {0} {1}' -f $Result.DisplayName, $Result.DisplayVersion)
         $Result | Select-Object -Property $PropertyNames
     }
 }
@@ -122,6 +121,7 @@ function Test-Scenario1 {
     # If there is no record of an impacted version being installed, assume the earliest possible date
     if ([String]::IsNullOrWhitespace($ImpactedVersionInstallDate)) {
         $ImpactedVersionInstallDate = $Start
+        Write-Log -Message ('Scenario 1: No impacted version install date found, using start date {0}.' -f $Start)
     }
 
     $BugFixVersionInstallDate = $Timeline | Where-Object {
@@ -134,6 +134,7 @@ function Test-Scenario1 {
     # The objective of trying to find an accurate date is to try and accurately advise the customer when to restore from
     if ([String]::IsNullOrWhitespace($BugFixVersionInstallDate)) {
         $BugFixVersionInstallDate = Get-Date
+        Write-Log -Message ('Scenario 1: No bug fix version install date found, using current date {0}.' -f $BugFixVersionInstallDate)
     }
 
     try {
@@ -146,7 +147,7 @@ function Test-Scenario1 {
     }
     catch {
         if ($_.FullyQualifiedErrorId -like 'NoMatchingEvents*') {
-            return $false
+            $Saves = @()
         }
         else {
             throw
@@ -155,7 +156,13 @@ function Test-Scenario1 {
 
     # Any backup available prior to this date is best 
     if ($Saves.Count -gt 0) {
+        Write-Log -Message ('Scenario 1: Impacted. {0} saves found between upgrading to an impacted version and a bug fix version.' -f $Saves.Count)
+
         return $ImpactedVersionInstallDate
+    }
+    else {
+        Write-Log -Message 'Scenario 1: Not impacted. No saves found between upgrading to an impacted version and a bug fix version.'
+        return $false
     }
 }
 
@@ -172,6 +179,7 @@ function Test-Scenario2 {
     # This reads funny because of the -not operator, but it essential means "if they are identical"
     if (-not (Compare-Object $Settings.DefaultOptions.Options.InnerXml @($DefaultOptionsDefaultValueXml,$DefaultOptionsDefaultValueXml))) {
         # If DefaultOptions are not configured and are default values, then not impacted
+        Write-Log -Message 'Scenario 2: Not impacted. DefaultOptions are not configured and are default values.'
         return $false
     }
     else {
@@ -179,8 +187,18 @@ function Test-Scenario2 {
         $IntuneApps = $Settings.DefaultOptions.Options.Where{$_.target -eq 'Intune Applications'}
         $IntuneUpdates = $Settings.DefaultOptions.Options.Where{$_.target -eq 'Intune Updates'}
 
-        -not (Compare-Object $IntuneApps.InnerXml $IntuneUpdates.InnerXml) -and
-        $Settings.DefaultOptions.Options.InnerXml -match 'IntuneAssignments'
+        if (-not (Compare-Object $IntuneApps.InnerXml $IntuneUpdates.InnerXml) -and $Settings.DefaultOptions.Options.InnerXml -match 'IntuneAssignments') {
+            Write-Log -Message 'Scenario 2: Impacted. DefaultOptions are configured, are identical and contain IntuneAssignments.'
+            return $true
+        }
+        elseif (-not (Compare-Object $IntuneApps.InnerXml $IntuneUpdates.InnerXml)) {
+            Write-Log -Message 'Scenario 2: Not impacted. DefaultOptions are identical but do not contain IntuneAssignments.'
+            return $false
+        }
+        else {
+            Write-Log -Message 'Scenario 2: Not impacted. DefaultOptions are either not identical.'
+            return $false
+        }
     }
 }
 
@@ -197,47 +215,54 @@ function Test-Scenario3 {
     $EvaluatedProducts = @{}
     $Result = @{}
 
-    foreach ($_Product in 
-        $Settings.Applications.SearchPattern, 
-        $Settings.Updates.SearchPattern
+    foreach ($PackageType in 
+        [array]$Settings.Applications.SearchPattern, 
+        [array]$Settings.Updates.SearchPattern
     ) {
-        # These are the right-click options common between Intune Apps and Intune Updates
-        $Object = [PSCustomObject]@{
-            ProductName                     = [String]$_Product.Product
-            ProductId                       = [String]$_Product.ProductId
-            VendorId                        = [String]$_Product.VendorId
-            Excluded                        = [String]$_Product.Excluded
-            AdditionalArg                   = [String]$_Product.AdditionalArg
-            PreCommand                      = [String]$_Product.PreCommand
-            PreCommandArg                   = [String]$_Product.PreCommandArg
-            AbortOnPreScriptFail            = [String]$_Product.AbortOnPreScriptFail
-            PostCommand                     = [String]$_Product.PostCommand
-            PostCommandArg                  = [String]$_Product.PostCommandArg
-            EnableLogging                   = [String]$_Product.EnableLogging.OuterXml
-            VerboseLogging                  = [String]$_Product.VerboseLogging
-            LoggingFolder                   = [String]$_Product.LoggingFolder
-            FailedInstallLogFolder          = [String]$_Product.FailedInstallLogFolder
-            SelfUpdater                     = [String]$_Product.'Self-Updater'.InnerXml
-            ReturnCodes                     = [String]$_Product.ReturnCodes.InnerXml
-            BlockingProcessManagementPolicy = [String]$_Product.BlockingProcessManagementPolicy.InnerXml
-            KillProcessList                 = [String]$_Product.KillProcessList
-            TransformFile                   = [String]$_Product.TransformFile
-            AdditionalFiles                 = [String]$_Product.AdditionalFiles.File
-            AdditionalFolders               = [String]$_Product.AdditionalFolders.Folder
-            IntuneCategoryIDs               = [String]$_Product.IntuneCategoryIDs.CategoryId
-            IntuneRoleScopeTagIDs           = [String]$_Product.IntuneRoleScopeTagIDs.RoleScopeTagId
-            IntuneNamingConvention          = [String]$_Product.IntuneNamingConvention
-            IntuneAssignments               = [String]$_Product.IntuneAssignments.IntuneAssignment.InnerXml
+        # Shouldn't be evaluating empty package types, but just in case
+        if ([String]::IsNullOrWhiteSpace($PackageType)) {
+            return $false
         }
 
-        if ($EvaluatedProducts[$_Product.ProductId]) {
-            # This reads funny because of the -not operator, but it essential means "if they are identical"
-            if (-not (Compare-Object $Object $EvaluatedProducts[$_Product.ProductId])) {
-                $Result[$_Product.ProductId] = $true
+        foreach ($_Product in $PackageType) {
+            # These are the right-click options common between Intune Apps and Intune Updates
+            $Object = [PSCustomObject]@{
+                ProductName                     = [String]$_Product.Product
+                ProductId                       = [String]$_Product.ProductId
+                VendorId                        = [String]$_Product.VendorId
+                Excluded                        = [String]$_Product.Excluded
+                AdditionalArg                   = [String]$_Product.AdditionalArg
+                PreCommand                      = [String]$_Product.PreCommand
+                PreCommandArg                   = [String]$_Product.PreCommandArg
+                AbortOnPreScriptFail            = [String]$_Product.AbortOnPreScriptFail
+                PostCommand                     = [String]$_Product.PostCommand
+                PostCommandArg                  = [String]$_Product.PostCommandArg
+                EnableLogging                   = [String]$_Product.EnableLogging.OuterXml
+                VerboseLogging                  = [String]$_Product.VerboseLogging
+                LoggingFolder                   = [String]$_Product.LoggingFolder
+                FailedInstallLogFolder          = [String]$_Product.FailedInstallLogFolder
+                SelfUpdater                     = [String]$_Product.'Self-Updater'.InnerXml
+                ReturnCodes                     = [String]$_Product.ReturnCodes.InnerXml
+                BlockingProcessManagementPolicy = [String]$_Product.BlockingProcessManagementPolicy.InnerXml
+                KillProcessList                 = [String]$_Product.KillProcessList
+                TransformFile                   = [String]$_Product.TransformFile
+                AdditionalFiles                 = [String]$_Product.AdditionalFiles.File
+                AdditionalFolders               = [String]$_Product.AdditionalFolders.Folder
+                IntuneCategoryIDs               = [String]$_Product.IntuneCategoryIDs.CategoryId
+                IntuneRoleScopeTagIDs           = [String]$_Product.IntuneRoleScopeTagIDs.RoleScopeTagId
+                IntuneNamingConvention          = [String]$_Product.IntuneNamingConvention
+                IntuneAssignments               = [String]$_Product.IntuneAssignments.IntuneAssignment.InnerXml
             }
-        }
-        else {
-            $EvaluatedProducts[$_Product.ProductId] = $Object
+
+            if ($EvaluatedProducts[$_Product.ProductId]) {
+                # This reads funny because of the -not operator, but it essential means "if they are identical"
+                if (-not (Compare-Object $Object $EvaluatedProducts[$_Product.ProductId])) {
+                    $Result[$_Product.ProductId] = $true
+                }
+            }
+            else {
+                $EvaluatedProducts[$_Product.ProductId] = $Object
+            }
         }
     }
 
@@ -249,20 +274,20 @@ function Test-Scenario3 {
     if ($TotalCount -gt 10) {
         $PercentageTrue = ($TrueCount / $TotalCount) * 100
         if ($PercentageTrue -ge 90) {
-            Write-Verbose ('{0}% of products with identical ProductId in Intune Apps and Intune Updates have identical configuration' -f 
-                            [math]::Round($PercentageTrue,2)) -Verbose
+            Write-Log -Message ('Scenario 3: Impacted. {0}% of products with identical ProductId in Intune Apps and Intune Updates have identical configuration.' -f 
+                            [math]::Round($PercentageTrue,2))
             return $true
         }
     }
     elseif ($Result.Values -notcontains $false) {
-        Write-Verbose ('All {0} products with identical ProductId in Intune Apps and Intune Updates have identical configuration' -f 
-                        $TotalCount) -Verbose
+        Write-Log -Message ('Scenario 3: Impacted. All {0} products with identical ProductId in Intune Apps and Intune Updates have identical configuration.' -f 
+                        $TotalCount)
         return $true
 
     }
     else {
-        Write-Verbose ('Only {0} products with identical ProductId in Intune Apps and Intune Updates have identical configuration' -f 
-                        $TrueCount) -Verbose
+        Write-Log -Message ('Scenario 3: Not impacted. Only {0} products with identical ProductId in Intune Apps and Intune Updates have identical configuration.' -f 
+                        $TrueCount)
         return $false
     }
 }
@@ -275,9 +300,23 @@ function Test-Scenario4 {
         [System.Xml.XmlElement]$Settings
     )
 
-    $Settings.Updates.SearchPattern.IntuneAssignments.IntuneAssignment.Intent -contains 'available' -or
-    $Settings.DefaultOptions.Options.Where{$_.target -eq 'Intune Updates'}.Vendor.IntuneAssignments.IntuneAssignment.Intent -contains 'available' -or
-    -not [String]::IsNullOrWhiteSpace($Settings.Updates.SearchPattern.IntuneAppEspIDs)
+    if ($Settings.Updates.SearchPattern.IntuneAssignments.IntuneAssignment.Intent -contains 'available') {
+        Write-Log -Message 'Scenario 4: Impacted. At least one Intune Update has an Available assignment.'
+        return $true
+    }
+    
+    if ($Settings.DefaultOptions.Options.Where{$_.target -eq 'Intune Updates'}.Vendor.IntuneAssignments.IntuneAssignment.Intent -contains 'available') {
+        Write-Log -Message 'Scenario 4: Impacted. Intune Updates DefaultOptions has an Available assignment.'
+        return $true
+    }
+
+    if (-not [String]::IsNullOrWhiteSpace($Settings.Updates.SearchPattern.IntuneAppEspIDs)) {
+        Write-Log -Message 'Scenario 4: Impacted. At least one Intune Update has IntuneAppEspIDs configured.'
+        return $true
+    }
+
+    Write-Log -Message 'Scenario 4: Not impacted. No tab-specific XML elements found in the incorrect tab.'
+    return $false
 }
 
 function Test-Scenario5 {
@@ -450,16 +489,19 @@ function Test-Scenario5 {
 
     foreach ($Product in $Settings.Updates.SearchPattern) {
         if ($AppOnlyProductIds -contains $Product.ProductId) {
+            Write-Log -Message 'Scenario 4: Impacted. At least one App-only product appears in Intune Updates.'
             return $true
         }
     }
 
     foreach ($Product in $Settings.Applications.SearchPattern) {
         if ($UpdateOnlyProductIds -contains $Product.ProductId) {
+            Write-Log -Message 'Scenario 4: Impacted. At least one Update-only product appears in Intune Apps.'
             return $true
         }
     }
 
+    Write-Log -Message 'Scenario 4: Not impacted. No App-only products appear in Intune Updates, and no Update-only products appear in Intune Apps.'
     return $false
 }
 
@@ -468,6 +510,9 @@ function Write-Result {
         [Parameter(Mandatory)]
         [ValidateSet('Yes','No')]
         [String]$Impacted,
+
+        [Parameter()]
+        [datetime]$DateOfImpact,
 
         [Parameter(Mandatory)]
         [ValidateSet(1,2,3)]
@@ -485,6 +530,11 @@ function Write-Result {
         Write-Host 'No' -ForegroundColor Green
     }
 
+    if ($Impacted -eq 'Yes') {
+        $CulturefInfo = Get-Culture
+        Write-Host ('Date of Impact: {0}' -f $DateOfImpact.ToString($CulturefInfo.LongDatePattern))
+    }
+
     Write-Host ('Scenario: {0}' -f $Scenario)
 
     if ($Impacted -eq 'No') {
@@ -492,8 +542,20 @@ function Write-Result {
     }
 
     Write-Host ('Advice: {0}' -f $Advice)
+
     Write-Host ''
-    Write-Host ('More Information: https://patchmypc.com/kb/publisher-configuration-overlap?scenario={0}' -f $Scenario)
+    Write-Host ('More Information: https://patchmypc.com/config-overlap?scenario={0}' -f $Scenario)
+
+    $f = 'yyyy-MM-dd'
+    Write-Log -Message (
+                'Result: Impacted={0}, DateOfImpact={1}, Scenario={2}, Advice={3}' -f @(
+                    $Impacted, 
+                    (if ($Impacted -eq 'Yes') { $DateOfImpact.ToString($f) + " ($f)" } else { 'N/A' }), 
+                    $Scenario, 
+                    $Advice
+                )
+            )
+    Write-Log -Message 'Finished Patch My PC Publisher Configuration Overlap Detection'
 }
 #endregion
 
@@ -546,13 +608,15 @@ if (Test-Path $BackupFolder) {
     $BackupCabFile = Get-ChildItem -Path $BackupFolder -Filter 'Settings*.cab' -ErrorAction 'Stop' | 
                         Where-Object { $_.LastWriteTime -le $BackupRestoreDate } |
                         Select-Object -Last 1
-    $WriteResultParams['Scenario'] = 2
-    $WriteResultParams['Advice'] = 'Backup found on disk. Please restore from backup created on {0} found at "{1}"' -f 
-                                        $BackupCabFile.LastWriteTime, $BackupCabFile.FullName
+    $WriteResultParams['Scenario']     = 2
+    $WriteResultParams['DateOfImpact'] = $BackupRestoreDate
+    $WriteResultParams['Advice']       = 'Backup found on disk. Please restore from backup created on {0} found at "{1}"' -f 
+                                            $BackupCabFile.LastWriteTime, $BackupCabFile.FullName
 }
 else {
-    $WriteResultParams['Scenario'] = 3
-    $WriteResultParams['Advice'] = 'Backup not found on disk. Please restore from backup created on or before {0}' -f $BackupRestoreDate
+    $WriteResultParams['Scenario']     = 3
+    $WriteResultParams['DateOfImpact'] = $BackupRestoreDate
+    $WriteResultParams['Advice']       = 'Backup not found on disk. Please restore from backup created on or before {0}' -f $BackupRestoreDate
 }
 
 foreach ($Tenant in $Settings.Tenant) {
@@ -562,7 +626,7 @@ foreach ($Tenant in $Settings.Tenant) {
     # i.e. only process tenants where both tabs are enabled and have products selected in both tabs
     if (
         ($Tenant.EnableApplications -ne 'True' -or $Tenant.EnableUpdates -ne 'True') -or
-        ([String]::IsNullOrWhiteSpace($Tenant.Applications) -or [String]::IsNullOrWhiteSpace($Tenant.Updates))
+        (-not [String]::IsNullOrWhiteSpace($Tenant.Applications) -and -not [String]::IsNullOrWhiteSpace($Tenant.Updates))
     ) {
         continue
     }
