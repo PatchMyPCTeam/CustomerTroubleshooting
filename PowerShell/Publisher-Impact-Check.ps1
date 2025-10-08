@@ -1,30 +1,5 @@
 #Requires -RunAsAdministrator
 
-<#
-    Scenario 1: Check if any saves have occured since upgrading to an impacted version
-    Scenario 2: If Intune Apps and Intune Updates have identical DefaultOptions
-    Scenario 3: Check if products in both tabs have identical config (where applicable)
-        e.g. product selections and right click options
-    Scenario 4: Check if any product has a tab-specific XML element in the incorrect tab
-        e.g. If any Intune Update has an Available assignment or IntuneAppEspIDs
-    Scenario 5: Check if a product incorrectly appears in the incorrect tab
-        e.g. App-only pkgs appearing in Intune Updates, or Update-only pkgs appearing in Intune Apps
-   
-    At the end:
-        - Indicate if impacted or not
-        - If impacted, advise which backup .cab on disk they should restore to
-        - parse publishing history .csv to list any Win32 pkgs erroneously published (and should be deleted)
-        - User facing output: 
-            Impacted: Yes/No
-            Scenario: 1/2/3
-            Advice:
-            1: "No action required"
-            2: "Backup found on disk. Please restore from backup created on <date> found at <path>"
-            3: "Backup not found on disk. Please restore from backup created on or before <date>"
-            
-            More Information: https://patchmypc.com/kb/publisher-configuration-overlap?scenario=<1/2/3/0>
-#>
-
 #region functions
 function Write-Log {
     param(
@@ -69,6 +44,8 @@ function Test-Scenario1 {
         Check if any saves have occured between upgrading to an impacted version and a bug fix version
         e.g. if no saves = not impacted, otherwise continue reviewing other scenarios
     #>
+
+    Write-Log -Message 'Test-Scenario1: Check if any saves have occured between upgrading to an impacted version and a bug fix version. If no saves = not impacted, otherwise continue reviewing other scenarios.'
 
     $Start = Get-Date -Year 2025 -Month 8 -Day 27
     try {
@@ -116,33 +93,45 @@ function Test-Scenario1 {
 
     $ImpactedVersionInstallDate = $Timeline | Where-Object {
         $ImpactedVersions -contains [System.Version]$_.Version
-    } | Select-Object -First 1 -ExpandProperty 'Time'
+    } | Select-Object -First 1
 
     # If there is no record of an impacted version being installed, assume the earliest possible date
     if ([String]::IsNullOrWhitespace($ImpactedVersionInstallDate)) {
-        $ImpactedVersionInstallDate = $Start
-        Write-Log -Message ('Scenario 1: No impacted version install date found, using start date {0}.' -f $Start)
+        $ImpactedVersionInstallDate = [PSCustomObject]@{
+            Version = '0.0.0.0'
+            Time    = $Start
+        }
     }
+
+    Write-Log -Message ('Test-Scenario1: First impacted version {0} installed on date {1}' -f 
+                            $ImpactedVersionInstallDate.Version,
+                            $ImpactedVersionInstallDate.Time.ToString('yyyy-MM-dd HH:mm:ss'))
 
     $BugFixVersionInstallDate = $Timeline | Where-Object {
         $_.Version -eq '2.1.50.0' -or [System.Version]$_.Version -gt [System.Version]'2.1.50.11'
-    } | Select-Object -First 1 -ExpandProperty 'Time'
+    } | Select-Object -First 1
 
     # If there is no record of a bug fix version being installed, assume the latest possible date
     # It's very unlikely that this and the $ImpactedVersionInstallDate are both null
     # However the intent here is to regardless go hunting in event viewer for evidence of saves
     # The objective of trying to find an accurate date is to try and accurately advise the customer when to restore from
     if ([String]::IsNullOrWhitespace($BugFixVersionInstallDate)) {
-        $BugFixVersionInstallDate = Get-Date
-        Write-Log -Message ('Scenario 1: No bug fix version install date found, using current date {0}.' -f $BugFixVersionInstallDate)
+        $BugFixVersionInstallDate = [PSCustomObject]@{
+            Version = '0.0.0.0'
+            Time    = Get-Date
+        }
     }
+
+    Write-Log -Message ('Test-Scenario1: Bug fix version {0} installed on date: {1}' -f 
+                            $BugFixVersionInstallDate.Version,
+                            $BugFixVersionInstallDate.Time.ToString('yyyy-MM-dd HH:mm:ss'))
 
     try {
         $Saves = Get-WinEvent -FilterHashtable @{
             LogName   = 'Patch My PC Publishing Service'
             Id        = 3009
-            StartTime = $ImpactedVersionInstallDate
-            EndTime   = $BugFixVersionInstallDate
+            StartTime = $ImpactedVersionInstallDate.Time
+            EndTime   = $BugFixVersionInstallDate.Time
         } -ErrorAction 'Stop'
     }
     catch {
@@ -156,12 +145,11 @@ function Test-Scenario1 {
 
     # Any backup available prior to this date is best 
     if ($Saves.Count -gt 0) {
-        Write-Log -Message ('Scenario 1: Impacted. {0} saves found between upgrading to an impacted version and a bug fix version.' -f $Saves.Count)
-
-        return $ImpactedVersionInstallDate
+        Write-Log -Message ('Test-Scenario1: Impacted. {0} saves found between upgrading to an impacted version and a bug fix version.' -f $Saves.Count)
+        return $ImpactedVersionInstallDate.Time
     }
     else {
-        Write-Log -Message 'Scenario 1: Not impacted. No saves found between upgrading to an impacted version and a bug fix version.'
+        Write-Log -Message 'Test-Scenario1: Not impacted. No saves found between upgrading to an impacted version and a bug fix version.'
         return $false
     }
 }
@@ -174,12 +162,14 @@ function Test-Scenario2 {
         [System.Xml.XmlElement]$Settings
     )
 
+    Write-Log -Message 'Test-Scenario2: Check if Intune Apps and Intune Updates have identical right-click options at All Products level (aka "DefaultOptions"). If identical and contain IntuneAssignments = impacted, otherwise not impacted.'
+
     $DefaultOptionsDefaultValueXml = '<Vendor name="AllVendors" inherited="False" />'
 
     # This reads funny because of the -not operator, but it essential means "if they are identical"
     if (-not (Compare-Object $Settings.DefaultOptions.Options.InnerXml @($DefaultOptionsDefaultValueXml,$DefaultOptionsDefaultValueXml))) {
         # If DefaultOptions are not configured and are default values, then not impacted
-        Write-Log -Message 'Scenario 2: Not impacted. DefaultOptions are not configured and are default values.'
+        Write-Log -Message 'Test-Scenario2: Not impacted. DefaultOptions are not configured and are default values.'
         return $false
     }
     else {
@@ -188,15 +178,15 @@ function Test-Scenario2 {
         $IntuneUpdates = $Settings.DefaultOptions.Options.Where{$_.target -eq 'Intune Updates'}
 
         if (-not (Compare-Object $IntuneApps.InnerXml $IntuneUpdates.InnerXml) -and $Settings.DefaultOptions.Options.InnerXml -match 'IntuneAssignments') {
-            Write-Log -Message 'Scenario 2: Impacted. DefaultOptions are configured, are identical and contain IntuneAssignments.'
+            Write-Log -Message 'Test-Scenario2: Impacted. DefaultOptions are configured, are identical and contain IntuneAssignments.'
             return $true
         }
         elseif (-not (Compare-Object $IntuneApps.InnerXml $IntuneUpdates.InnerXml)) {
-            Write-Log -Message 'Scenario 2: Not impacted. DefaultOptions are identical but do not contain IntuneAssignments.'
+            Write-Log -Message 'Test-Scenario2: Not impacted. DefaultOptions are identical but do not contain IntuneAssignments.'
             return $false
         }
         else {
-            Write-Log -Message 'Scenario 2: Not impacted. DefaultOptions are either not identical.'
+            Write-Log -Message 'Test-Scenario2: Not impacted. DefaultOptions are not identical.'
             return $false
         }
     }
@@ -207,18 +197,20 @@ function Test-Scenario3 {
         Check if products in both tabs have identical config
         e.g. product selections and right click options (where applicable)
     #>
-
     param(
         [System.Xml.XmlElement]$Settings
     )
 
+    Write-Log -Message 'Test-Scenario3: Check if products in both tabs have identical configuration. For example, product selections and right-click options (where applicable).'
+
     $EvaluatedProducts = @{}
     $Result = @{}
+    $Apps = [array]$Settings.Applications.SearchPattern
+    $Updates = [array]$Settings.Updates.SearchPattern
 
-    foreach ($PackageType in 
-        [array]$Settings.Applications.SearchPattern, 
-        [array]$Settings.Updates.SearchPattern
-    ) {
+    Write-Log -Message ('Test-Scenario3: Found {0} products in Intune Apps and {1} products in Intune Updates.' -f $Apps.Count, $Updates.Count)
+
+    foreach ($PackageType in $Apps, $Updates) {
         # Shouldn't be evaluating empty package types, but just in case
         if ([String]::IsNullOrWhiteSpace($PackageType)) {
             return $false
@@ -266,27 +258,30 @@ function Test-Scenario3 {
         }
     }
 
+    Write-Log -Message ('Test-Scenario3: Product Ids: {0}' -f ([array]$Result.Keys | ConvertTo-Json))
+
     # count the number of $true values in $Result.value, and if more than 90% are $true, then return $true
     # if there are 10 or fewer and all are $true, return $true
     # otherwise return $false
     $TrueCount = ([array]$Result.Values).Count
     $TotalCount = ([array]$Settings.Applications.SearchPattern).Count + ([array]$Settings.Updates.SearchPattern).Count
+    $Threshold = 90
     if ($TotalCount -gt 10) {
         $PercentageTrue = ($TrueCount / $TotalCount) * 100
-        if ($PercentageTrue -ge 90) {
-            Write-Log -Message ('Scenario 3: Impacted. {0}% of products with identical ProductId in Intune Apps and Intune Updates have identical configuration.' -f 
+        if ($PercentageTrue -ge $Threshold) {
+            Write-Log -Message ('Test-Scenario3: Impacted. {0}% of products with the same ProductId in both Intune Apps and Intune Updates tabs have identical right-click options configuration.' -f 
                             [math]::Round($PercentageTrue,2))
             return $true
         }
     }
     elseif ($Result.Values -notcontains $false) {
-        Write-Log -Message ('Scenario 3: Impacted. All {0} products with identical ProductId in Intune Apps and Intune Updates have identical configuration.' -f 
-                        $TotalCount)
+        Write-Log -Message ('Test-Scenario3: Impacted. Found {0} products exceed the threshold with the same ProductId in both Intune Apps and Intune Updates tabs with identical right-click options configuration.' -f 
+                        $TrueCount)
         return $true
 
     }
     else {
-        Write-Log -Message ('Scenario 3: Not impacted. Only {0} products with identical ProductId in Intune Apps and Intune Updates have identical configuration.' -f 
+        Write-Log -Message ('Test-Scenario3: Not impacted. Only {0} products did not exceed the threshold with the same ProductId in both Intune Apps and Intune Updates tabs with identical right-click options configuration.' -f 
                         $TrueCount)
         return $false
     }
@@ -300,22 +295,24 @@ function Test-Scenario4 {
         [System.Xml.XmlElement]$Settings
     )
 
+    Write-Log -Message 'Test-Scenario4: Check if any product has a tab-specific XML element in the incorrect tab. For example, if any Intune Update has an Available assignment or IntuneAppEspIDs.'
+
     if ($Settings.Updates.SearchPattern.IntuneAssignments.IntuneAssignment.Intent -contains 'available') {
-        Write-Log -Message 'Scenario 4: Impacted. At least one Intune Update has an Available assignment.'
+        Write-Log -Message 'Test-Scenario4: Impacted. At least one Intune Update has an Available assignment.'
         return $true
     }
     
     if ($Settings.DefaultOptions.Options.Where{$_.target -eq 'Intune Updates'}.Vendor.IntuneAssignments.IntuneAssignment.Intent -contains 'available') {
-        Write-Log -Message 'Scenario 4: Impacted. Intune Updates DefaultOptions has an Available assignment.'
+        Write-Log -Message 'Test-Scenario4: Impacted. Intune Updates DefaultOptions has an Available assignment.'
         return $true
     }
 
     if (-not [String]::IsNullOrWhiteSpace($Settings.Updates.SearchPattern.IntuneAppEspIDs)) {
-        Write-Log -Message 'Scenario 4: Impacted. At least one Intune Update has IntuneAppEspIDs configured.'
+        Write-Log -Message 'Test-Scenario4: Impacted. At least one Intune Update has IntuneAppEspIDs configured.'
         return $true
     }
 
-    Write-Log -Message 'Scenario 4: Not impacted. No tab-specific XML elements found in the incorrect tab.'
+    Write-Log -Message 'Test-Scenario4: Not impacted. No tab-specific XML elements found in the incorrect tab.'
     return $false
 }
 
@@ -327,6 +324,8 @@ function Test-Scenario5 {
     param(
         [System.Xml.XmlElement]$Settings
     )
+
+    Write-Log -Message 'Test-Scenario5: Check if a product incorrectly appears in the incorrect tab. For example, App-only packages appearing in Intune Updates, or Update-only packages appearing in Intune Apps.'
 
     # These ProductIds are true as of 2025-10-07
     $UpdateOnlyProductIds = @(
@@ -489,19 +488,19 @@ function Test-Scenario5 {
 
     foreach ($Product in $Settings.Updates.SearchPattern) {
         if ($AppOnlyProductIds -contains $Product.ProductId) {
-            Write-Log -Message 'Scenario 4: Impacted. At least one App-only product appears in Intune Updates.'
+            Write-Log -Message 'Test-Scenario5: Impacted. At least one App-only product appears in Intune Updates.'
             return $true
         }
     }
 
     foreach ($Product in $Settings.Applications.SearchPattern) {
         if ($UpdateOnlyProductIds -contains $Product.ProductId) {
-            Write-Log -Message 'Scenario 4: Impacted. At least one Update-only product appears in Intune Apps.'
+            Write-Log -Message 'Test-Scenario5: Impacted. At least one Update-only product appears in Intune Apps.'
             return $true
         }
     }
 
-    Write-Log -Message 'Scenario 4: Not impacted. No App-only products appear in Intune Updates, and no Update-only products appear in Intune Apps.'
+    Write-Log -Message 'Test-Scenario5: Not impacted. No App-only products appear in Intune Updates, and no Update-only products appear in Intune Apps.'
     return $false
 }
 
@@ -544,13 +543,13 @@ function Write-Result {
     Write-Host ('Advice: {0}' -f $Advice)
 
     Write-Host ''
-    Write-Host ('More Information: https://patchmypc.com/config-overlap?scenario={0}' -f $Scenario)
+    Write-Host ('More information: https://patchmypc.com/config-overlap?scenario={0}' -f $Scenario)
 
     $f = 'yyyy-MM-dd'
     Write-Log -Message (
                 'Result: Impacted={0}, DateOfImpact={1}, Scenario={2}, Advice={3}' -f @(
                     $Impacted, 
-                    (if ($Impacted -eq 'Yes') { $DateOfImpact.ToString($f) + " ($f)" } else { 'N/A' }), 
+                    $(if ($Impacted -eq 'Yes') { $DateOfImpact.ToString($f) + " ($f)" } else { 'N/A' }), 
                     $Scenario, 
                     $Advice
                 )
@@ -569,6 +568,7 @@ if ($ExecutionContext.SessionState.LanguageMode -eq 'ConstrainedLanguage') {
 
 Write-Log -Message 'Checking if Patch My PC Publishing Service is installed'
 $Publisher = Get-InstalledSoftware -DisplayName 'Patch My PC Publishing Service'
+Write-Log -Message ('ARP data: ' + ($Publisher | ConvertTo-Json))
 
 if ([String]::IsNullOrWhitespace($Publisher)) {
     $Message = 'Patch My PC Publishing Service is not installed on this device'
@@ -596,6 +596,8 @@ else {
                     Select-Object -ExpandProperty 'IntuneTenants'
 }
 
+Write-Log -Message 'Beginning scenario tests'
+
 $BackupRestoreDate = Test-Scenario1
 
 if ($BackupRestoreDate -eq $false) {
@@ -605,18 +607,25 @@ if ($BackupRestoreDate -eq $false) {
 
 $BackupFolder = '{0}\Backup' -f $Publisher.InstallLocation
 if (Test-Path $BackupFolder) {
-    $BackupCabFile = Get-ChildItem -Path $BackupFolder -Filter 'Settings*.cab' -ErrorAction 'Stop' | 
+    $BackupCabFile = Get-ChildItem -Path $BackupFolder -Filter 'Settings*.cab' -ErrorAction 'SilentlyContinue' | 
                         Where-Object { $_.LastWriteTime -le $BackupRestoreDate } |
                         Select-Object -Last 1
+}
+
+if (-not [String]::IsNullOrWhiteSpace($BackupCabFile)) {
     $WriteResultParams['Scenario']     = 2
     $WriteResultParams['DateOfImpact'] = $BackupRestoreDate
-    $WriteResultParams['Advice']       = 'Backup found on disk. Please restore from backup created on {0} found at "{1}"' -f 
+    $WriteResultParams['Advice']       = "Backup found on disk. Please restore from backup created on {0} found at:`n`t`"{1}`"" -f 
                                             $BackupCabFile.LastWriteTime, $BackupCabFile.FullName
+
+    Write-Log -Message ('Found recommended backup .cab file: {0}' -f $BackupCabFile.Name)
 }
 else {
     $WriteResultParams['Scenario']     = 3
     $WriteResultParams['DateOfImpact'] = $BackupRestoreDate
     $WriteResultParams['Advice']       = 'Backup not found on disk. Please restore from backup created on or before {0}' -f $BackupRestoreDate
+
+    Write-Log -Message 'No backup .cab file found on disk preadting impacted version install date'
 }
 
 foreach ($Tenant in $Settings.Tenant) {
@@ -625,13 +634,13 @@ foreach ($Tenant in $Settings.Tenant) {
     # or if there are no products enabled in at least one tab, skip this tenant
     # i.e. only process tenants where both tabs are enabled and have products selected in both tabs
     if (
-        ($Tenant.EnableApplications -ne 'True' -or $Tenant.EnableUpdates -ne 'True') -or
-        (-not [String]::IsNullOrWhiteSpace($Tenant.Applications) -and -not [String]::IsNullOrWhiteSpace($Tenant.Updates))
+        ($Tenant.EnableApplications -ne 'True' -and $Tenant.EnableUpdates -ne 'True') -or
+        ([String]::IsNullOrWhiteSpace($Tenant.Applications) -and [String]::IsNullOrWhiteSpace($Tenant.Updates))
     ) {
         continue
     }
 
-    if (Test-Scenario2 -Settings $Tenant) {
+    if (Test-Scenario2 -Settings $Tenant) {c
         Write-Result -Impacted 'Yes' @WriteResultParams
         return
     }
