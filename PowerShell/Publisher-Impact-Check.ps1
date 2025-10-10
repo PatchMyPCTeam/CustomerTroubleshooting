@@ -644,7 +644,7 @@ function Test-Scenario6 {
         [PSObject[]]$PublishingHistory
     )
 
-    # These are all the update IDs of update-only products released since 2025-08-27 to 2025-10-09
+    # These are all the update IDs of update-only products as of 2025-10-10
     $UpdateOnlyUpdateIDs = @(
         '6900f4be-a854-4c2f-aee4-9941726aae66', 
         '212c9745-58e0-4cee-aa0d-f283adbba4a1', 
@@ -800,7 +800,7 @@ function Test-Scenario6 {
         'cd272d0f-2a17-4405-97f7-6b3e94bdeca3'
     )
 
-    # These are all the update IDs of app-only products released since 2025-08-27 to 2025-10-09
+    # These are all the update IDs of app-only products as of 2025-10-10
     $AppOnlyUpdateIDs = @(
         '7fe05185-7841-42fd-9a3e-baef67526e46',
         '97641e25-07e5-4fb5-b2eb-f3f79e01e01b',
