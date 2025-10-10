@@ -222,7 +222,7 @@ function Test-Scenario1 {
         } -ErrorAction 'Stop'
     }
     catch {
-        if ($_.FullyQualifiedErrorId -like 'NoMatchingEvents*') {
+        if ($_.FullyQualifiedErrorId -match 'NoMatchingEvents|NoMatchingLogsFound') {
             $Saves = @()
         }
         else {
@@ -260,11 +260,21 @@ function Test-Scenario2 {
         return $false
     }
     else {
-        # However, if DefaultOptions are configured, are identical and contain IntuneAssignments, then flag as impacted
-        $IntuneApps = $Settings.DefaultOptions.Options.Where{$_.target -eq 'Intune Applications'}
-        $IntuneUpdates = $Settings.DefaultOptions.Options.Where{$_.target -eq 'Intune Updates'}
+        # However, if DefaultOptions are configured, then check if they are identical and contain IntuneAssignments = flag as impacted
+        $IntuneApps    = $Settings.DefaultOptions.Options | 
+                            Where-Object { $_.target -eq 'Intune Applications' } | 
+                            Select-Object -ExpandProperty Vendor | 
+                            Where-Object { $_.Name -eq 'AllVendors' }
+        $IntuneUpdates = $Settings.DefaultOptions.Options | 
+                            Where-Object { $_.target -eq 'Intune Updates' } | 
+                            Select-Object -ExpandProperty Vendor | 
+                            Where-Object { $_.Name -eq 'AllVendors' }
 
-        if (-not (Compare-Object $IntuneApps.InnerXml $IntuneUpdates.InnerXml) -and $Settings.DefaultOptions.Options.InnerXml -match 'IntuneAssignments') {
+        if ([String]::IsNullOrWhiteSpace($IntuneApps.InnerXml) -or [String]::IsNullOrWhiteSpace($IntuneUpdates.InnerXml)) {
+            Write-Log -Message 'Test-Scenario2: Not impacted. IntuneAssignments is not configured for one of the Intune Apps or Intune Updates tabs.'
+            return $false
+        }
+        elseif (-not (Compare-Object $IntuneApps.InnerXml $IntuneUpdates.InnerXml) -and $Settings.DefaultOptions.Options.InnerXml -match 'IntuneAssignments') {
             Write-Log -Message 'Test-Scenario2: Impacted. DefaultOptions are configured, are identical and contain IntuneAssignments.'
             return $true
         }
@@ -295,10 +305,10 @@ function Test-Scenario3 {
     $Apps = [array]$Settings.Applications.SearchPattern
     $Updates = [array]$Settings.Updates.SearchPattern
 
-    Write-Log -Message ('Test-Scenario3: Found {0} products in Intune Apps and {1} products in Intune Updates.' -f $Apps.Count, $Updates.Count)
+    Write-Log -Message ('Test-Scenario3: Found {0} product(s) in Intune Apps and {1} product(s) in Intune Updates.' -f $Apps.Count, $Updates.Count)
 
     foreach ($PackageType in $Apps, $Updates) {
-        # Shouldn't be evaluating empty package types, but just in case
+        # This function shouldn't be called if the tenant's tabs are disabled or have zero products enabled in either tab, but just in case
         if ([String]::IsNullOrWhiteSpace($PackageType)) {
             return $false
         }
@@ -335,7 +345,7 @@ function Test-Scenario3 {
 
             if ($EvaluatedProducts[$_Product.ProductId]) {
                 # This reads funny because of the -not operator, but it essential means "if they are identical"
-                if (-not (Compare-Object $Object $EvaluatedProducts[$_Product.ProductId])) {
+                if (-not (Compare-Object $Object $EvaluatedProducts[$_Product.ProductId] -Property $Object.PSObject.Properties.Name)) {
                     $Result[$_Product.ProductId] = $true
                 }
             }
@@ -345,31 +355,38 @@ function Test-Scenario3 {
         }
     }
 
-    # count the number of $true values in $Result.value, and if more than 90% are $true, then return $true
-    # if there are 10 or fewer and all are $true, return $true
-    # otherwise return $false
+    # If the number of products with the same ProductId in both tabs is greater than 10, then use a percentage threshold of 90% to determine if impacted
+    # If there are fewer than 10 products enabled in either tab, then all products with the same ProductId in both tabs must be identical to be considered impacted
+    # Otherwise return $false
     $TrueCount = ([array]$Result.Values).Count
-    $TotalCount = ([array]$Settings.Applications.SearchPattern).Count + ([array]$Settings.Updates.SearchPattern).Count
+    $TotalCount = if (([array]$Settings.Applications.SearchPattern).Count -ge ([array]$Settings.Updates.SearchPattern).Count) {
+        ([array]$Settings.Updates.SearchPattern).Count
+    }
+    else {
+        ([array]$Settings.Applications.SearchPattern).Count
+    }
     $Threshold = 90
+    
     if ($TotalCount -gt 10) {
         $PercentageTrue = ($TrueCount / $TotalCount) * 100
         if ($PercentageTrue -ge $Threshold) {
-            Write-Log -Message ('Test-Scenario3: Impacted. {0}% of products with the same ProductId in both Intune Apps and Intune Updates tabs have identical right-click options configuration.' -f 
+            Write-Log -Message ('Test-Scenario3: Impacted. {0}% of products with the same ProductId, present in both the Intune Apps and Intune Updates tabs, have identical right-click options configuration.' -f 
                             [math]::Round($PercentageTrue,2))
             Write-Log -Message ('Test-Scenario3: Product Ids: {0}' -f ($Result.Keys | ConvertTo-Json))
             return $true
         }
     }
-    elseif ($Result.Values -notcontains $false) {
-        Write-Log -Message ('Test-Scenario3: Impacted. Found {0} products exceed the threshold with the same ProductId in both Intune Apps and Intune Updates tabs with identical right-click options configuration.' -f 
+    elseif ($TrueCount -gt 0 -and $TrueCount -eq $TotalCount) {
+        Write-Log -Message ('Test-Scenario3: Impacted. {0} product(s) found with the same ProductId(s), present in both the Intune Apps and Intune Updates tabs, have identical right-click options configuration.' -f 
                         $TrueCount)
         Write-Log -Message ('Test-Scenario3: Product Ids: {0}' -f ($Result.Keys | ConvertTo-Json))
         return $true
 
     }
     else {
-        Write-Log -Message ('Test-Scenario3: Not impacted. Only {0} products did not exceed the threshold with the same ProductId in both Intune Apps and Intune Updates tabs with identical right-click options configuration.' -f 
-                        $TrueCount)
+        Write-Log -Message ('Test-Scenario3: Not impacted. {0} product(s) found with the same ProductId(s), present in both the Intune Apps and Intune Updates tabs and have identical right-click options configuration. However, there is {1} product(s) enabled in both tabs but with different configuration. This is below the threshold to declare as impacted.' -f 
+                        $TrueCount, ($TotalCount - $TrueCount))
+        Write-Log -Message ('Test-Scenario3: Product Ids: {0}' -f ($Result.Keys | ConvertTo-Json))
         return $false
     }
 }
@@ -389,9 +406,9 @@ function Test-Scenario4 {
         return $true
     }
 
-    $UpdatesWithAvailableAssignment = $Settings.Updates.SearchPattern.Where{
+    $UpdatesWithAvailableAssignment = $Settings.Updates.SearchPattern | Where-Object {
         $_.IntuneAssignments.IntuneAssignment.Intent -contains 'available'
-    }.ProductId
+    } | Select-Object -ExpandProperty ProductId
 
     if (-not [String]::IsNullOrWhiteSpace($UpdatesWithAvailableAssignment)) {
         Write-Log -Message 'Test-Scenario4: Impacted. At least one Intune Update has an Available assignment.'
@@ -399,9 +416,9 @@ function Test-Scenario4 {
         return $true
     }
 
-    $UpdatesWithEspIds = $Settings.Updates.SearchPattern.Where{
+    $UpdatesWithEspIds = $Settings.Updates.SearchPattern | Where-Object {
         -not [String]::IsNullOrWhiteSpace($_.IntuneAppEspIDs)
-    }.ProductId
+    } | Select-Object -ExpandProperty ProductId
 
     if (-not [String]::IsNullOrWhiteSpace($UpdatesWithEspIds)) {
         Write-Log -Message 'Test-Scenario4: Impacted. At least one Intune Update has IntuneAppEspIDs configured.'
@@ -595,9 +612,18 @@ function Test-Scenario5 {
         }
     }
 
-    if (([array]$IntuneUpdates).Count -gt 0 -or ([array]$IntuneApps).Count -gt 0) {
-        Write-Log -Message ('Test-Scenario5: Impacted. Product Ids in Intune Updates: {0}' -f ($IntuneUpdates | ConvertTo-Json))
-        Write-Log -Message ('Test-Scenario5: Impacted. Product Ids in Intune Apps: {0}' -f ($IntuneApps | ConvertTo-Json))
+    $ReturnTrue = $false
+    if (([array]$IntuneUpdates).Count -gt 0) {
+        Write-Log -Message ('Test-Scenario5: Impacted. These Product Id(s) incorrectly appear in the Intune Updates tab: {0}' -f ($IntuneUpdates | ConvertTo-Json))
+        $ReturnTrue = $true
+    }
+
+    if (([array]$IntuneApps).Count -gt 0) {
+        Write-Log -Message ('Test-Scenario5: Impacted. These Product Id(s) incorrectly appear in the Intune Apps tab: {0}' -f ($IntuneApps | ConvertTo-Json))
+        $ReturnTrue = $true
+    }
+
+    if ($ReturnTrue) {
         return $true
     }
     else {
