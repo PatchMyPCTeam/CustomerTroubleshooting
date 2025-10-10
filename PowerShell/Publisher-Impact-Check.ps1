@@ -804,9 +804,7 @@ if ($BackupRestoreDate -ne $false -and $BackupRestoreDate -is [datetime]) {
     }
     else {
         try {
-            $PublishingHistory = Import-Csv -Path $PublishingHistoryCsv -ErrorAction Stop | 
-                Where-Object { [datetime]::Parse($_.Date) -gt $BackupRestoreDate }
-
+            $PublishingHistory = Import-Csv -Path $PublishingHistoryCsv -ErrorAction Stop
             $Scenario6Result = Test-Scenario -Id 6 -PublishingHistory $PublishingHistory
         }
         catch {
