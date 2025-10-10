@@ -948,20 +948,18 @@ foreach ($Tenant in $Settings.Tenant) {
 
 # Always check scenario 6 (erroneously published packages) regardless of tenant results
 $Scenario6Result = $false
-if ($BackupRestoreDate -ne $false -and $BackupRestoreDate -is [datetime]) {
-    $PublishingHistoryCsv = '{0}\PatchMyPC-PublishingHistory.csv' -f $Publisher.InstallLocation
-    
-    if (-not (Test-Path $PublishingHistoryCsv)) {
-        Write-Log -Message ('Publishing history file not found: {0}' -f $PublishingHistoryCsv)
+$PublishingHistoryCsv = '{0}\PatchMyPC-PublishingHistory.csv' -f $Publisher.InstallLocation
+
+if (-not (Test-Path $PublishingHistoryCsv)) {
+    Write-Log -Message ('Publishing history file not found: {0}' -f $PublishingHistoryCsv)
+}
+else {
+    try {
+        $PublishingHistory = Import-Csv -Path $PublishingHistoryCsv -ErrorAction Stop
+        $Scenario6Result = Test-Scenario -Id 6 -PublishingHistory $PublishingHistory
     }
-    else {
-        try {
-            $PublishingHistory = Import-Csv -Path $PublishingHistoryCsv -ErrorAction Stop
-            $Scenario6Result = Test-Scenario -Id 6 -PublishingHistory $PublishingHistory
-        }
-        catch {
-            Write-Log -Message ('Failed to process publishing history: {0}' -f $_.Exception.Message)
-        }
+    catch {
+        Write-Log -Message ('Failed to process publishing history: {0}' -f $_.Exception.Message)
     }
 }
 
