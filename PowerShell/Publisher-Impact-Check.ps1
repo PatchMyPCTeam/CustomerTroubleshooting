@@ -1,6 +1,9 @@
-#Requires -RunAsAdministrator
-
 #region functions
+function Test-Administrator {  
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent();
+    (New-Object Security.Principal.WindowsPrincipal $user).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)  
+}
+
 function Write-Log {
     param(
         [Parameter(Mandatory)]
@@ -692,6 +695,11 @@ function Test-Scenario6 {
     }
 }
 #endregion
+
+if (-not(Test-Administrator)) {
+    Write-Warning 'This script must be run as an administrator.'
+    return
+}
 
 Write-Log -Message 'Starting Patch My PC Publisher Configuration Overlap Detection'
 
