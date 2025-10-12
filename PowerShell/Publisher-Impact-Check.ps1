@@ -1,3 +1,18 @@
+<#
+Scenarios Checked:
+1. **Upgrade/Save Overlap**: Checks if any configuration saves occurred between installing an impacted version and a fixed version. If so, the environment may be impacted and a backup restore is recommended.
+2. **Identical Default Options**: Checks if Intune Apps and Intune Updates have identical right-click options (DefaultOptions) at the All Products level, especially if both contain IntuneAssignments. If so, the environment is impacted.
+3. **Identical Product Configurations**: Checks if products enabled in both Intune Apps and Updates have identical configuration (right-click options, etc). If a high percentage (≥90% if >10 products, or all if ≤10) are identical, the environment is impacted.
+4. **Tab-Specific XML in Wrong Tab**: Checks if any product or default option has a tab-specific XML element (e.g., Available assignment or IntuneAppEspIDs) in the wrong tab. If so, the environment is impacted.
+5. **Product in Wrong Tab**: Checks if app-only products appear in Intune Updates, or update-only products appear in Intune Apps. If so, the environment is impacted.
+6. **Erroneous Publishing**: Checks if any products have been erroneously published (e.g., app-only products published as Intune Updates, or update-only products published as Intune Apps) using publishing history.
+
+Expected Output:
+- The script prints a summary of whether the environment is impacted, the scenario(s) detected, the date of impact (if applicable), and actionable advice (such as restoring from backup or removing specific apps from Intune).
+- If impacted, it may list Win32 App IDs to remove and provide a link for more information.
+- All results are logged to a file in the temp directory.
+
+#>
 #region functions
 function Test-Administrator {  
     $user = [Security.Principal.WindowsIdentity]::GetCurrent();
