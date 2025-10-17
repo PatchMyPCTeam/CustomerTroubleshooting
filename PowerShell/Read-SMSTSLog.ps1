@@ -13,11 +13,11 @@ param (
 )
 
 # No need to sort, default file system ordering here is perfect as-is
-$smstslog = Get-ChildItem $Path -Recurse -File -Filter 'smsts*.log'
+$smstslog = Get-ChildItem $Path -File -Filter 'smsts*.log'
 
 $Regex = '(?<Result>Successfully completed the action|Failed to run the action)(?:: (?<FailedActionName>[^.]+)\. Error (?<ErrorCode>[^]]+)\]LOG]\!| \((?<SuccessActionName>[^)]+)\)).*?time="(?<Time>[^"]+)" date="(?<Date>[^"]+)"'
 
-foreach ($Log in $smstslog) {
+$r = foreach ($Log in $smstslog) {
     Get-Content $Log | ForEach-Object { 
         if ($_ -match $Regex) {
 
@@ -35,7 +35,10 @@ foreach ($Log in $smstslog) {
                 Step     = $Step
                 ExitCode = $ExitCode
                 Date     = '{0} {1}' -f $Matches['Date'], $Matches['Time']
+                LogFile  = $Log.Name
             }
         }
     }
 }
+
+$r | Format-Table -AutoSize
