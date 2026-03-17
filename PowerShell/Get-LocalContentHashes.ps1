@@ -26,7 +26,7 @@ $VerbosePreference = 'Continue'
 
 # Check if the script is running with administrative permissions
 If (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw "This script must be run with administrative permissions. Please re-run PowerShell as an Administrator."
+    throw "This script must be run with administrative permissions. Please re-run it as Administrator."
 }
 
 Function Get-MsiInfo {
