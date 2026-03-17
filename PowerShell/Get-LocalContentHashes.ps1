@@ -24,6 +24,11 @@
 $pmpreg = 'SOFTWARE\Patch My PC Publishing Service'
 $VerbosePreference = 'Continue'
 
+# Check if the script is running with administrative permissions
+If (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw "This script must be run with administrative permissions. Please re-run PowerShell as an Administrator."
+}
+
 Function Get-MsiInfo {
     Param (
         [Parameter(Mandatory = $true)]
