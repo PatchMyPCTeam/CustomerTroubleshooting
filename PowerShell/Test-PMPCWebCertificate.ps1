@@ -1,4 +1,3 @@
-
 <#
 .SYNOPSIS
 Tests HTTPS connectivity and prints remote certificate details for a URL.
@@ -88,4 +87,5 @@ catch {
     Write-Host $_.Exception.Message -ForegroundColor Red
 }
 
+# Pause to ensure the user can read the output before the console closes
 Read-Host "Press Enter to exit..."
