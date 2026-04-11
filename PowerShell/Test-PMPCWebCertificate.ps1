@@ -11,11 +11,11 @@ expiration, and subject).
 Absolute HTTP or HTTPS URL to test.
 
 .EXAMPLE
-.\PMPC_Client_WebTest.ps1
+.\Test-PMPCWebCertificate.ps1
 Runs the test against the default URL: https://patchmypc.com
 
 .EXAMPLE
-.\PMPC_Client_WebTest.ps1 -URL "https://example.com"
+.\Test-PMPCWebCertificate.ps1 -URL "https://example.com"
 Runs the same connectivity and certificate checks for a custom URL.
 #>
 
