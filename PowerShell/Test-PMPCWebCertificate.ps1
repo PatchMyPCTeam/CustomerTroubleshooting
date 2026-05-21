@@ -63,15 +63,37 @@ try {
         [System.Net.Security.RemoteCertificateValidationCallback] { param($s, $c, $ch, $e) $true }
     )
     try {
-        $sslStream.AuthenticateAsClient($HostName)
+        # Preserve any pre-configured protocols and ensure TLS 1.2 is always included
+        $sslProtocols = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Security.Authentication.SslProtocols]::Tls12
+        $sslStream.AuthenticateAsClient($HostName, $null, $sslProtocols, $false)
         $RemoteCert = $sslStream.RemoteCertificate
         if ($null -ne $RemoteCert) {
             $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($RemoteCert)
+
+            $AIAUrls = $null
+            $CRLUrls = $null
+            foreach ($extension in $cert.Extensions) {
+                switch ($extension.Oid.Value) {
+                    '1.3.6.1.5.5.7.1.1' {
+                        # AIA (Authority Information Access)
+                        $formatted = ([System.Security.Cryptography.AsnEncodedData]::new($extension.Oid, $extension.RawData)).Format($true)
+                        $AIAUrls = [regex]::Matches($formatted, 'https?://[^\s,;)]+').Value
+                    }
+                    '2.5.29.31' {
+                        # CRL Distribution Points
+                        $formatted = ([System.Security.Cryptography.AsnEncodedData]::new($extension.Oid, $extension.RawData)).Format($true)
+                        $CRLUrls = [regex]::Matches($formatted, 'https?://[^\s,;)]+').Value
+                    }
+                }
+            }
+            
             [PSCustomObject]@{
                 Thumbprint = $cert.Thumbprint
                 Issuer     = $cert.Issuer
                 NotAfter   = $cert.NotAfter
                 Subject    = $cert.Subject
+                AIA        = $AIAUrls
+                CRLs       = $CRLUrls
             } | Format-List
         }
         else {
