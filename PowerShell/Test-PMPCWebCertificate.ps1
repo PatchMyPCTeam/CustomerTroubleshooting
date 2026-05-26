@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-Tests HTTPS connectivity, outputs remote certificate details, and tests revocation for a URL.
+Tests HTTPS connectivity, outputs remote leAf certificate details, and tests revocation for a URL.
 
 .DESCRIPTION
 Validates the provided URL, opens a plain TCP connection to verify network
@@ -15,7 +15,7 @@ Absolute HTTP or HTTPS URL to test.
 
 .PARAMETER ShowAllCerts
 When specified, displays all certificates sent by the server (leaf + intermediates).
-By default only the leaf certificate is displayed.
+Shows all certs that were NOT used during revocation
 
 .EXAMPLE
 .\Test-PMPCWebCertificate.ps1
@@ -28,6 +28,11 @@ Runs the same connectivity and certificate checks for a custom URL.
 .EXAMPLE
 .\Test-PMPCWebCertificate.ps1 -URL "https://example.com" -ShowAllCerts
 Runs the checks and displays all certificates in the chain sent by the server.
+
+.NOTES
+    Author:  Michael Escamilla
+    Date:    2026-05-26
+    Version: 2.0
 #>
 
 param(
@@ -98,8 +103,7 @@ if ($URI.Scheme -eq 'https') {
     }
 
     #region - Retrieve and display certificate details
-    Write-Host ""
-    Write-Host "----------------------------------" -ForegroundColor DarkGray
+    Write-Host "`n----------------------------------" -ForegroundColor DarkGray
     Write-Host "Retrieving Certificate Details" -ForegroundColor Cyan
     Write-Host "Connects via TLS and displays the server's certificate metadata, No Cert checks." -ForegroundColor DarkGray
     Write-Host "----------------------------------" -ForegroundColor DarkGray
@@ -118,7 +122,7 @@ if ($URI.Scheme -eq 'https') {
             param($s, $c, $ch, $e)
             # ChainElements contains the OS-resolved chain (leaf + intermediates + root).
             $Script:ServerSentChain = $ch.ChainElements |
-                ForEach-Object { [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($_.Certificate) }
+            ForEach-Object { [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($_.Certificate) }
             $true
         }
 
@@ -135,10 +139,6 @@ if ($URI.Scheme -eq 'https') {
             $RemoteCert = $sslStream.RemoteCertificate
             if ($null -ne $RemoteCert) {
                 $Certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($RemoteCert)
-
-                # Capture AIA/CRL URLs from the leaf cert
-                $AIAUrls = Get-CertExtensionUrls -Certificate $Certificate -Oid '1.3.6.1.5.5.7.1.1'
-                $CRLUrls = Get-CertExtensionUrls -Certificate $Certificate -Oid '2.5.29.31'
 
                 # By default show only the leaf cert. -ShowAllCerts shows all certs the server sent.
                 $CertChain = if ($ShowAllCerts -and $Script:ServerSentChain) { $Script:ServerSentChain } else { @($Certificate) }
@@ -176,8 +176,7 @@ if ($URI.Scheme -eq 'https') {
     #endregion
 
     #region - Test certificate chain trust
-    Write-Host ""
-    Write-Host "----------------------------------" -ForegroundColor DarkGray
+    Write-Host "`n----------------------------------" -ForegroundColor DarkGray
     Write-Host "Testing Certificate Chain Trust" -ForegroundColor Cyan
     Write-Host "Verifies the certificate chain using the Windows trust store without revocation checks." -ForegroundColor DarkGray
     Write-Host "If this fails, the cert or chain is not trusted by this machine's Windows certificate store." -ForegroundColor DarkGray
@@ -218,10 +217,10 @@ if ($URI.Scheme -eq 'https') {
     #region - Test certificate revocation
     # Contacts live OCSP/CRL endpoints to verify no cert in the chain has been revoked.
     # Unreachable endpoints are reported separately from actual revocations.
-    Write-Host ""
-    Write-Host "----------------------------------" -ForegroundColor DarkGray
+    Write-Host "`n----------------------------------" -ForegroundColor DarkGray
     Write-Host "Testing Certificate Revocation" -ForegroundColor Cyan
     Write-Host "Contacts OCSP/CRL endpoints to check revocation status for each cert in the chain." -ForegroundColor DarkGray
+    Write-Host "The trust path may differ from what the server sent due to AIA fetching or local store resolution." -ForegroundColor DarkGray
     Write-Host "----------------------------------" -ForegroundColor DarkGray
 
     if ($null -eq $Certificate) {
@@ -243,9 +242,16 @@ if ($URI.Scheme -eq 'https') {
             $CertChainRev.ChainPolicy.VerificationFlags =
             [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::IgnoreCertificateAuthorityRevocationUnknown -bor
             [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::IgnoreEndRevocationUnknown
+            # Seed the intermediate certs so hopefully Windows follows the trust path rather than resolving its own chain via AIA downloads or local store
+            if ($Script:ServerSentChain -and $Script:ServerSentChain.Count -gt 1) {
+                foreach ($serverCert in $Script:ServerSentChain | Select-Object -Skip 1) {
+                    [void]$CertChainRev.ChainPolicy.ExtraStore.Add($serverCert)
+                }
+            }
             try {
                 Write-Host "Performing revocation check..." -ForegroundColor DarkGray
                 [void]$CertChainRev.Build($Certificate)
+
                 for ($i = 0; $i -lt $CertChainRev.ChainElements.Count; $i++) {
                     $CurrentCert = $CertChainRev.ChainElements[$i]
                     # Determine the role of this cert in the chain (same logic as the display section)
@@ -257,17 +263,30 @@ if ($URI.Scheme -eq 'https') {
                     # Look for any revocation-related status on this element specifically
                     $revStatus = $CurrentCert.ChainElementStatus | Where-Object { $_.Status -in 'Revoked', 'RevocationStatusUnknown', 'OfflineRevocation' } | Select-Object -First 1
                     if ($null -eq $revStatus) {
-                        Write-Host "  OK         : [$Role] $CommonName [$AIAUrls]" -ForegroundColor Green
+                        Write-Host "  OK         : [$Role] $($CommonName) - [$($CurrentCert.Certificate.Thumbprint)]" -ForegroundColor Green
                     }
                     else {
                         switch ($revStatus.Status) {
                             'Revoked' {
-                                Write-Host "  REVOKED    : [$Role] $CommonName [$AIAUrls]" -ForegroundColor Red
+                                Write-Host "  REVOKED    : [$Role] $($CommonName) [$($AIAUrls)]" -ForegroundColor Red
                             }
                             { $_ -in 'RevocationStatusUnknown', 'OfflineRevocation' } {
-                                Write-Host "  UNREACHABLE: [$Role] $CommonName" -ForegroundColor Yellow
-                                Write-Host "               Verify connectivity to: $AIAUrls" -ForegroundColor Yellow
+                                Write-Host "  UNREACHABLE: [$Role] $($CommonName)" -ForegroundColor Yellow
+                                Write-Host "               Verify connectivity to: $($AIAUrls)" -ForegroundColor Yellow
                             }
+                        }
+                    }
+                }
+
+                # Notify if Windows resolved a different chain path than the server sent
+                $resolvedThumbs = $CertChainRev.ChainElements | ForEach-Object { $_.Certificate.Thumbprint }
+                $diff = $Script:ServerSentChain | Where-Object { $_.Thumbprint -notin $resolvedThumbs }
+                if ($diff) {
+                    Write-Host "`nWindows resolved a different trust path; $($diff.Count) server-sent cert(s) were not used$(if (-not $ShowAllCerts) { ' (use -ShowAllCerts to see which)' })." -ForegroundColor DarkGray
+                    if ($ShowAllCerts) {
+                        foreach ($excludedCert in $diff) {
+                            $excludedCN = if ($excludedCert.Subject -match 'CN=([^,]+)') { $Matches[1].Trim() } else { $excludedCert.Thumbprint }
+                            Write-Host "  Not used   : $excludedCN [$($excludedCert.Thumbprint)]" -ForegroundColor DarkGray
                         }
                     }
                 }
@@ -283,8 +302,7 @@ if ($URI.Scheme -eq 'https') {
     #endregion
 }
 else {
-    Write-Host ""
-    Write-Host "Skipping certificate checks: scheme '$($URI.Scheme)' is not https." -ForegroundColor Yellow
+    Write-Host "`nSkipping certificate checks: scheme '$($URI.Scheme)' is not https." -ForegroundColor Yellow
 }
 
 # Pause to ensure the user can read the output before the console closes
