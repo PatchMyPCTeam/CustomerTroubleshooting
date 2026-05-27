@@ -131,8 +131,8 @@ if ($URI.Scheme -eq 'https') {
             $tcpClient.GetStream(), $false, $validationCallback
         )
         try {
-            # Preserve existing protocols and include TLS 1.2
-            $sslProtocols = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Security.Authentication.SslProtocols]::Tls12
+            # TLS 1.2 (3072) and TLS 1.3 (12288) via numeric cast - safe on all .NET versions
+            $sslProtocols = [System.Security.Authentication.SslProtocols](3072 -bor 12288)
             # Perform the TLS handshake; revocation check is skipped here and done manually later
             $sslStream.AuthenticateAsClient($HostName, $null, $sslProtocols, $false)
             # Get the server's certificate from the SSL stream
@@ -172,6 +172,13 @@ if ($URI.Scheme -eq 'https') {
     }
     catch {
         Write-Host $_.Exception.Message -ForegroundColor Red
+        if ($_.Exception.Message -match 'closed the transport stream|Authentication failed') {
+            Write-Host "Hint: TCP connectivity succeeded but the TLS handshake was rejected." -ForegroundColor Yellow
+            Write-Host "      Likely causes:" -ForegroundColor Yellow
+            Write-Host "        - SSL inspection intercepting or blocking the handshake" -ForegroundColor Yellow
+            Write-Host "        - Firewall performing deep packet inspection and dropping the TLS ClientHello" -ForegroundColor Yellow
+            Write-Host "        - TLS version or cipher suite mismatch between this client and the server/proxy" -ForegroundColor Yellow
+        }
     }
     #endregion
 
