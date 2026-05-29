@@ -32,7 +32,7 @@ Runs the checks and displays all certificates in the chain sent by the server.
 .NOTES
     Author:  Michael Escamilla
     Date:    2026-05-26
-    Version: 2.0
+    Version: 2.1
 #>
 
 param(
@@ -61,6 +61,7 @@ catch {
 #endregion
 
 Write-Host "Running as: [$([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)]" -ForegroundColor DarkGray
+Write-Host "PowerShell : $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor) ($($PSVersionTable.PSEdition))" -ForegroundColor DarkGray
 
 #region - Test TCP connectivity
 # A plain TCP connect tests network reachability with zero cert/OCSP involvement.
@@ -115,14 +116,16 @@ if ($URI.Scheme -eq 'https') {
         $tcpClient.Connect($HostName, $Port)
 
         # Capture the chain the server actually sent during the TLS handshake.
-        # The callback's X509Chain is built from the certs the server presented (leaf + any intermediates).
         # Script-scope is used because scriptblock-as-delegate runs in an isolated scope.
         $Script:ServerSentChain = $null
+        $Script:SslPolicyErrors = [System.Net.Security.SslPolicyErrors]::None
         $validationCallback = [System.Net.Security.RemoteCertificateValidationCallback] {
             param($s, $c, $ch, $e)
             # ChainElements contains the OS-resolved chain (leaf + intermediates + root).
             $Script:ServerSentChain = $ch.ChainElements |
             ForEach-Object { [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($_.Certificate) }
+            # Capture OS-reported TLS policy errors (revocation errors absent since checkCertificateRevocation=false)
+            $Script:SslPolicyErrors = $e
             $true
         }
 
@@ -131,8 +134,11 @@ if ($URI.Scheme -eq 'https') {
             $tcpClient.GetStream(), $false, $validationCallback
         )
         try {
-            # Preserve existing protocols and include TLS 1.2
-            $sslProtocols = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Security.Authentication.SslProtocols]::Tls12
+            # Start with TLS 1.2; add TLS 1.3 only if the runtime supports it (.NET Core 3+ / .NET 5+)
+            $sslProtocols = [System.Security.Authentication.SslProtocols]::Tls12
+            if ([Enum]::IsDefined([System.Security.Authentication.SslProtocols], 12288)) {
+                $sslProtocols = [System.Security.Authentication.SslProtocols]($sslProtocols -bor 12288)
+            }
             # Perform the TLS handshake; revocation check is skipped here and done manually later
             $sslStream.AuthenticateAsClient($HostName, $null, $sslProtocols, $false)
             # Get the server's certificate from the SSL stream
@@ -172,131 +178,109 @@ if ($URI.Scheme -eq 'https') {
     }
     catch {
         Write-Host $_.Exception.Message -ForegroundColor Red
-    }
-    #endregion
-
-    #region - Test certificate chain trust
-    Write-Host "`n----------------------------------" -ForegroundColor DarkGray
-    Write-Host "Testing Certificate Chain Trust" -ForegroundColor Cyan
-    Write-Host "Verifies the certificate chain using the Windows trust store without revocation checks." -ForegroundColor DarkGray
-    Write-Host "If this fails, the cert or chain is not trusted by this machine's Windows certificate store." -ForegroundColor DarkGray
-    Write-Host "----------------------------------" -ForegroundColor DarkGray
-
-    if ($null -eq $Certificate) {
-        Write-Host "Skipped - no certificate was retrieved." -ForegroundColor Yellow
-    }
-    else {
-        try {
-            $CertChainTrust = [System.Security.Cryptography.X509Certificates.X509Chain]::new()
-            # Skip revocation here so chain trust is evaluated independently of OCSP/CRL reachability
-            $CertChainTrust.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
-            # Report every chain problem - don't ignore any validation errors
-            $CertChainTrust.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
-            try {
-                $Script:ChainTrustPassed = $CertChainTrust.Build($Certificate)
-                if ($Script:ChainTrustPassed) {
-                    Write-Host "Chain Trust: Passed (signatures, trust, expiration, name)" -ForegroundColor Green
-                }
-                else {
-                    Write-Host "Chain Trust: Failed" -ForegroundColor Red
-                    foreach ($status in $CertChainTrust.ChainStatus) {
-                        Write-Host "  - $($status.Status): $($status.StatusInformation.Trim())" -ForegroundColor Red
-                    }
-                }
-            }
-            finally {
-                $CertChainTrust.Dispose()
-            }
-        }
-        catch {
-            Write-Host $_.Exception.Message -ForegroundColor Red
+        if ($_.Exception.Message -match 'closed the transport stream|Authentication failed') {
+            Write-Host "Hint: TCP connectivity succeeded but the TLS handshake was rejected." -ForegroundColor Yellow
+            Write-Host "      Likely causes:" -ForegroundColor Yellow
+            Write-Host "        - SSL inspection intercepting or blocking the handshake" -ForegroundColor Yellow
+            Write-Host "        - Firewall performing deep packet inspection and dropping the TLS ClientHello" -ForegroundColor Yellow
+            Write-Host "        - TLS version or cipher suite mismatch between this client and the server/proxy" -ForegroundColor Yellow
         }
     }
     #endregion
 
-    #region - Test certificate revocation
+    #region - Test certificate validation
     # Contacts live OCSP/CRL endpoints to verify no cert in the chain has been revoked.
     # Unreachable endpoints are reported separately from actual revocations.
     Write-Host "`n----------------------------------" -ForegroundColor DarkGray
-    Write-Host "Testing Certificate Revocation" -ForegroundColor Cyan
+    Write-Host "Testing Certificate Validation" -ForegroundColor Cyan
     Write-Host "Contacts OCSP/CRL endpoints to check revocation status for each cert in the chain." -ForegroundColor DarkGray
     Write-Host "The trust path may differ from what the server sent due to AIA fetching or local store resolution." -ForegroundColor DarkGray
+    Write-Host "Tip: To force a live OCSP/CRL check (bypass Windows cache) run: certutil -urlcache * delete" -ForegroundColor DarkGray
+    if ($PSVersionTable.PSVersion.Major -lt 7) {
+        Write-Host "NOTE: Running on PowerShell $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor) - Chain validation may not follow the server-sent intermediates" -ForegroundColor Yellow
+        Write-Host "      Windows may resolve its own path via AIA or local store instead." -ForegroundColor Yellow
+        Write-Host "      Re-run using pwsh.exe (PS7+/.NET Core 3.1+) for more reliable results." -ForegroundColor Yellow
+    }
     Write-Host "----------------------------------" -ForegroundColor DarkGray
 
     if ($null -eq $Certificate) {
         Write-Host "Skipped - no certificate was retrieved." -ForegroundColor Yellow
     }
-    elseif (-not $Script:ChainTrustPassed) {
-        Write-Host "Skipped - chain trust failed. Fix the chain before checking revocation." -ForegroundColor Yellow
-    }
     else {
-        try {
-            # Windows caches OCSP/CRL responses, to manually clear run: certutil -urlcache * delete
-
-            $CertChainRev = [System.Security.Cryptography.X509Certificates.X509Chain]::new()
-            # Contact the OCSP/CRL endpoint to perform a live revocation check (as opposed to Offline or NoCheck)
-            $CertChainRev.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::Online
-            # Check every cert in the chain (leaf, intermediates, root) for revocation
-            $CertChainRev.ChainPolicy.RevocationFlag = [System.Security.Cryptography.X509Certificates.X509RevocationFlag]::EntireChain
-            # Suppress RevocationStatusUnknown from the aggregate ChainStatus - we read per-element status directly below
-            $CertChainRev.ChainPolicy.VerificationFlags =
-            [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::IgnoreCertificateAuthorityRevocationUnknown -bor
-            [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::IgnoreEndRevocationUnknown
-            # Seed the intermediate certs so hopefully Windows follows the trust path rather than resolving its own chain via AIA downloads or local store
-            if ($Script:ServerSentChain -and $Script:ServerSentChain.Count -gt 1) {
-                foreach ($serverCert in $Script:ServerSentChain | Select-Object -Skip 1) {
-                    [void]$CertChainRev.ChainPolicy.ExtraStore.Add($serverCert)
-                }
-            }
-            try {
-                Write-Host "Performing revocation check..." -ForegroundColor DarkGray
-                [void]$CertChainRev.Build($Certificate)
-
-                for ($i = 0; $i -lt $CertChainRev.ChainElements.Count; $i++) {
-                    $CurrentCert = $CertChainRev.ChainElements[$i]
-                    # Determine the role of this cert in the chain (same logic as the display section)
-                    $Role = if ($i -eq 0) { 'Leaf' } elseif ($CurrentCert.Certificate.Subject -eq $CurrentCert.Certificate.Issuer) { 'Root' } else { 'Intermediate' }
-                    # Extract CN from the subject for readable output, fall back to thumbprint if no CN
-                    $CommonName = if ($CurrentCert.Certificate.Subject -match 'CN=([^,]+)') { $Matches[1].Trim() } else { $CurrentCert.Certificate.Thumbprint }
-                    # Get the AIA URLs from this cert - these are the OCSP/CRL endpoints that were contacted
-                    $AIAUrls = if ($urls = Get-CertExtensionUrls -Certificate $CurrentCert.Certificate -Oid '1.3.6.1.5.5.7.1.1') { $urls -join ', ' } else { 'none' }
-                    # Look for any revocation-related status on this element specifically
-                    $revStatus = $CurrentCert.ChainElementStatus | Where-Object { $_.Status -in 'Revoked', 'RevocationStatusUnknown', 'OfflineRevocation' } | Select-Object -First 1
-                    if ($null -eq $revStatus) {
-                        Write-Host "  OK         : [$Role] $($CommonName) - [$($CurrentCert.Certificate.Thumbprint)]" -ForegroundColor Green
-                    }
-                    else {
-                        switch ($revStatus.Status) {
-                            'Revoked' {
-                                Write-Host "  REVOKED    : [$Role] $($CommonName) [$($AIAUrls)]" -ForegroundColor Red
-                            }
-                            { $_ -in 'RevocationStatusUnknown', 'OfflineRevocation' } {
-                                Write-Host "  UNREACHABLE: [$Role] $($CommonName)" -ForegroundColor Yellow
-                                Write-Host "               Verify connectivity to: $($AIAUrls)" -ForegroundColor Yellow
-                            }
-                        }
-                    }
-                }
-
-                # Notify if Windows resolved a different chain path than the server sent
-                $resolvedThumbs = $CertChainRev.ChainElements | ForEach-Object { $_.Certificate.Thumbprint }
-                $diff = $Script:ServerSentChain | Where-Object { $_.Thumbprint -notin $resolvedThumbs }
-                if ($diff) {
-                    Write-Host "`nWindows resolved a different trust path; $($diff.Count) server-sent cert(s) were not used$(if (-not $ShowAllCerts) { ' (use -ShowAllCerts to see which)' })." -ForegroundColor DarkGray
-                    if ($ShowAllCerts) {
-                        foreach ($excludedCert in $diff) {
-                            $excludedCN = if ($excludedCert.Subject -match 'CN=([^,]+)') { $Matches[1].Trim() } else { $excludedCert.Thumbprint }
-                            Write-Host "  Not used   : $excludedCN [$($excludedCert.Thumbprint)]" -ForegroundColor DarkGray
-                        }
-                    }
-                }
-            }
-            finally {
-                $CertChainRev.Dispose()
+        $CertChainVal = [System.Security.Cryptography.X509Certificates.X509Chain]::new()
+        $CertChainVal.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::Online
+        $CertChainVal.ChainPolicy.RevocationFlag = [System.Security.Cryptography.X509Certificates.X509RevocationFlag]::ExcludeRoot
+        $CertChainVal.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
+        $CertChainVal.ChainPolicy.UrlRetrievalTimeout = [System.TimeSpan]::Zero
+        $CertChainVal.ChainPolicy.VerificationTime = [System.DateTime]::Now
+        # Seed the intermediate certs so hopefully Windows follows the trust path rather than resolving its own chain via AIA downloads or local store
+        if ($Script:ServerSentChain -and $Script:ServerSentChain.Count -gt 1) {
+            foreach ($serverCert in $Script:ServerSentChain | Select-Object -Skip 1) {
+                [void]$CertChainVal.ChainPolicy.ExtraStore.Add($serverCert)
             }
         }
-        catch {
-            Write-Host $_.Exception.Message -ForegroundColor Red
+        try {
+            $ValidChain = $CertChainVal.Build($Certificate)
+            Write-Host "Chain Validation : $(if ($ValidChain) { 'Passed' } else { 'FAILED' })" -ForegroundColor $(if ($ValidChain) { 'Green' } else { 'Red' })
+            for ($i = 0; $i -lt $CertChainVal.ChainElements.Count; $i++) {
+                $CertElement = $CertChainVal.ChainElements[$i]
+                $Role = if ($i -eq 0) { 'Leaf' } elseif ($CertElement.Certificate.Subject -eq $CertElement.Certificate.Issuer) { 'Root' } else { 'Intermediate' }
+                $CommonName = if ($CertElement.Certificate.Subject -match 'CN=([^,]+)') { $Matches[1].Trim() } else { $CertElement.Certificate.Thumbprint }
+                $AIAUrls = if ($urls = Get-CertExtensionUrls -Certificate $CertElement.Certificate -Oid '1.3.6.1.5.5.7.1.1') { $urls -join ', ' } else { 'none' }
+                if (-not $CertElement.ChainElementStatus) {
+                    Write-Host "     OK          : [$Role] $CommonName" -ForegroundColor Green
+                }
+                else {
+                    # Handle revocation statuses as a group - only print UNREACHABLE once per cert
+                    # even if both RevocationStatusUnknown and OfflineRevocation are present
+                    $RevStatus = $CertElement.ChainElementStatus | Where-Object { $_.Status -in 'Revoked', 'RevocationStatusUnknown', 'OfflineRevocation' } | Select-Object -First 1
+                    if ($RevStatus) {
+                        switch ($RevStatus.Status) {
+                            'Revoked' {
+                                Write-Host "     REVOKED     : [$Role] $CommonName [$AIAUrls]" -ForegroundColor Red
+                            }
+                            default {
+                                Write-Host "     UNREACHABLE : [$Role] $CommonName" -ForegroundColor Yellow
+                                Write-Host "                   Verify connectivity to: $AIAUrls" -ForegroundColor Yellow
+                            }
+                        }
+                    }
+                    # Handle all other (non-revocation) statuses individually
+                    foreach ($Status in $CertElement.ChainElementStatus | Where-Object { $_.Status -notin 'Revoked', 'RevocationStatusUnknown', 'OfflineRevocation' }) {
+                        Write-Host "     $($Status.Status.ToString().PadRight(12)): [$Role] $CommonName : $($Status.StatusInformation.Trim())" -ForegroundColor Red
+                    }
+                }
+            }
+            # Notify if Windows resolved a different chain path than the server sent
+            $resolvedThumbs = $CertChainVal.ChainElements | ForEach-Object { $_.Certificate.Thumbprint }
+            $diff = $Script:ServerSentChain | Where-Object { $_.Thumbprint -notin $resolvedThumbs }
+            if ($diff) {
+                Write-Host "`nWindows resolved a different trust path; $($diff.Count) server-sent cert(s) were not used$(if (-not $ShowAllCerts) { ' (use -ShowAllCerts to see which)' })." -ForegroundColor DarkGray
+                if ($ShowAllCerts) {
+                    foreach ($excludedCert in $diff) {
+                        $excludedCommonName = if ($excludedCert.Subject -match 'CN=([^,]+)') { $Matches[1].Trim() } else { $excludedCert.Thumbprint }
+                        Write-Host "     Not used    : $excludedCommonName [$($excludedCert.Thumbprint)]" -ForegroundColor DarkGray
+                    }
+                }
+            }
+        }
+        finally {
+            $CertChainVal.Dispose()
+        }
+
+        # This is the SslPolicyErrors value the OS reported during the TLS handshake (captured in the callback).
+        # This WILL catch: RemoteCertificateChainErrors from an untrusted/replaced cert
+        # (e.g. TLS inspection proxy) and RemoteCertificateNameMismatch.
+        $cleanPolicy = $Script:SslPolicyErrors -eq [System.Net.Security.SslPolicyErrors]::None
+        Write-Host ""
+        if ($cleanPolicy) {
+            Write-Host "SSL Policy       : Passed" -ForegroundColor Green
+        }
+        else {
+            Write-Host "SSL Policy       : FAILED - $($Script:SslPolicyErrors)" -ForegroundColor Red
+            Write-Host "   Common causes:" -ForegroundColor Yellow
+            Write-Host "   - TLS inspection proxy replacing the certificate (RemoteCertificateChainErrors)" -ForegroundColor Yellow
+            Write-Host "   - Certificate name mismatch detected by OS before callback (RemoteCertificateNameMismatch)" -ForegroundColor Yellow
         }
     }
     #endregion
