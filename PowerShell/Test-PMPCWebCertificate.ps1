@@ -61,6 +61,7 @@ catch {
 #endregion
 
 Write-Host "Running as: [$([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)]" -ForegroundColor DarkGray
+Write-Host "PowerShell : $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor) ($($PSVersionTable.PSEdition))" -ForegroundColor DarkGray
 
 #region - Test TCP connectivity
 # A plain TCP connect tests network reachability with zero cert/OCSP involvement.
@@ -115,7 +116,6 @@ if ($URI.Scheme -eq 'https') {
         $tcpClient.Connect($HostName, $Port)
 
         # Capture the chain the server actually sent during the TLS handshake.
-        # The callback's X509Chain is built from the certs the server presented (leaf + any intermediates).
         # Script-scope is used because scriptblock-as-delegate runs in an isolated scope.
         $Script:ServerSentChain = $null
         $Script:SslPolicyErrors = [System.Net.Security.SslPolicyErrors]::None
@@ -134,8 +134,11 @@ if ($URI.Scheme -eq 'https') {
             $tcpClient.GetStream(), $false, $validationCallback
         )
         try {
-            # TLS 1.2 (3072) and TLS 1.3 (12288) via numeric cast - safe on all .NET versions
-            $sslProtocols = [System.Security.Authentication.SslProtocols](3072 -bor 12288)
+            # Start with TLS 1.2; add TLS 1.3 only if the runtime supports it (.NET Core 3+ / .NET 5+)
+            $sslProtocols = [System.Security.Authentication.SslProtocols]::Tls12
+            if ([Enum]::IsDefined([System.Security.Authentication.SslProtocols], 12288)) {
+                $sslProtocols = [System.Security.Authentication.SslProtocols]($sslProtocols -bor 12288)
+            }
             # Perform the TLS handshake; revocation check is skipped here and done manually later
             $sslStream.AuthenticateAsClient($HostName, $null, $sslProtocols, $false)
             # Get the server's certificate from the SSL stream
@@ -189,14 +192,14 @@ if ($URI.Scheme -eq 'https') {
     # Contacts live OCSP/CRL endpoints to verify no cert in the chain has been revoked.
     # Unreachable endpoints are reported separately from actual revocations.
     # Tip: To force a live OCSP/CRL check (bypass Windows cache) run: certutil -urlcache * delete
-    $psVersion = $PSVersionTable.PSVersion
     Write-Host "`n----------------------------------" -ForegroundColor DarkGray
     Write-Host "Testing Certificate Validation" -ForegroundColor Cyan
     Write-Host "Contacts OCSP/CRL endpoints to check revocation status for each cert in the chain." -ForegroundColor DarkGray
     Write-Host "The trust path may differ from what the server sent due to AIA fetching or local store resolution." -ForegroundColor DarkGray
-    Write-Host "PowerShell : $($psVersion.Major).$($psVersion.Minor) ($($PSVersionTable.PSEdition))" -ForegroundColor DarkGray
-    if ($psVersion.Major -lt 7) {
-        Write-Host "NOTE: Running on Windows PowerShell 5.x (.NET Framework). Chain validation behavior may differ from applications targeting .NET 5+. Re-run using pwsh.exe (PS7+) to test against the .NET runtime." -ForegroundColor Yellow
+    if ($PSVersionTable.PSVersion.Major -lt 7) {
+        Write-Host "NOTE: Running on PowerShell $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor) - Chain validation may not follow the server-sent intermediates" -ForegroundColor Yellow
+        Write-Host "      Windows may resolve its own path via AIA or local store instead." -ForegroundColor Yellow
+        Write-Host "      Re-run using pwsh.exe (PS7+/.NET Core 3.1+) for more reliable results." -ForegroundColor Yellow
     }
     Write-Host "----------------------------------" -ForegroundColor DarkGray
 
@@ -265,14 +268,13 @@ if ($URI.Scheme -eq 'https') {
             $CertChainVal.Dispose()
         }
 
-        # --- Check: cleanPolicy ---
         # This is the SslPolicyErrors value the OS reported during the TLS handshake (captured in the callback).
         # This WILL catch: RemoteCertificateChainErrors from an untrusted/replaced cert
         # (e.g. TLS inspection proxy) and RemoteCertificateNameMismatch.
         $cleanPolicy = $Script:SslPolicyErrors -eq [System.Net.Security.SslPolicyErrors]::None
         Write-Host ""
         if ($cleanPolicy) {
-            Write-Host "SSL Policy       : Passed (None)" -ForegroundColor Green
+            Write-Host "SSL Policy       : Passed" -ForegroundColor Green
         }
         else {
             Write-Host "SSL Policy       : FAILED - $($Script:SslPolicyErrors)" -ForegroundColor Red
