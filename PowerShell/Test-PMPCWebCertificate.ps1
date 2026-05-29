@@ -191,11 +191,11 @@ if ($URI.Scheme -eq 'https') {
     #region - Test certificate validation
     # Contacts live OCSP/CRL endpoints to verify no cert in the chain has been revoked.
     # Unreachable endpoints are reported separately from actual revocations.
-    # Tip: To force a live OCSP/CRL check (bypass Windows cache) run: certutil -urlcache * delete
     Write-Host "`n----------------------------------" -ForegroundColor DarkGray
     Write-Host "Testing Certificate Validation" -ForegroundColor Cyan
     Write-Host "Contacts OCSP/CRL endpoints to check revocation status for each cert in the chain." -ForegroundColor DarkGray
     Write-Host "The trust path may differ from what the server sent due to AIA fetching or local store resolution." -ForegroundColor DarkGray
+    Write-Host "Tip: To force a live OCSP/CRL check (bypass Windows cache) run: certutil -urlcache * delete" -ForegroundColor DarkGray
     if ($PSVersionTable.PSVersion.Major -lt 7) {
         Write-Host "NOTE: Running on PowerShell $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor) - Chain validation may not follow the server-sent intermediates" -ForegroundColor Yellow
         Write-Host "      Windows may resolve its own path via AIA or local store instead." -ForegroundColor Yellow
