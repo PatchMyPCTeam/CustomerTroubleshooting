@@ -1,4 +1,4 @@
-# Patch My PC Connectivity Test
+# Network Connectivity Test
 
 A single-file PowerShell tool that can be used to test connectivity to websites and servers.
 
