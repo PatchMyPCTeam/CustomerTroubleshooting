@@ -2,6 +2,8 @@
 
 A single-file PowerShell tool that can be used to test connectivity to websites and servers.
 
+<img width="1080" height="832" alt="image" src="https://github.com/user-attachments/assets/c4ebf4e5-7481-4670-bd79-1ce8850e2228" />
+
 It runs the checks **as the logged-on user or as `NT AUTHORITY\SYSTEM`**, using the same proxy, TLS and DNS settings the service itself would use.
 
 ## Why this exists
