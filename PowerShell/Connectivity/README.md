@@ -51,6 +51,8 @@ powershell.exe -ExecutionPolicy Bypass -File .\Invoke-ConnectivityTest.ps1
 
 The dropdown is pre-populated with the endpoints the Publishing Service uses. If the Publisher is installed, a second group of endpoints is **scraped from the PatchMyPC.log**, newest first, so you can test the URL that  failed easily.
 
+<img width="1080" height="832" alt="image" src="https://github.com/user-attachments/assets/441610f3-1f81-402c-a80b-2f21d451c026" />
+
 ### TESTS tab
 
 | Group | Check | What it does |
