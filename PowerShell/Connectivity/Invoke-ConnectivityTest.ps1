@@ -57,8 +57,21 @@ You assume all risks and responsibilities associated with its usage
 
 .NOTES
     Name       : Invoke-ConnectivityTest.ps1
-    Author     : BenWhitmore@PatchMyPC
+    Publisher  : Patch My PC
+    Author     : Ben Whitmore
+    Copyright  : (c) Patch My PC. All rights reserved.
     Requires   : Windows PowerShell 5.1
+
+    Windows PowerShell 5.1 is the deliberate target, not a fallback. The Publishing
+    Service is a .NET Framework 4.x application and 5.1 shares that runtime, so it
+    resolves proxies and negotiates TLS identically. PowerShell 7 (.NET 8) reads
+    HTTP_PROXY/HTTPS_PROXY before WinINET and ignores SchUseStrongCrypto, so it can
+    report a pass for a path the service fails on.
+
+    No -STA switch is needed: powershell.exe has run single-threaded since PowerShell 3.0
+    and pwsh does the same on Windows. Only an explicit -MTA changes it, and the tool still
+    runs - the embedded WebBrowser is an ActiveX control that cannot be created outside an
+    STA, so the Browser tab drops its Rendered view and shows the response source instead.
 #>
 [CmdletBinding()]
 param(
@@ -776,7 +789,10 @@ $PNT_Functions = {
         $out.Add("=== TCP PORT TEST : $hostName ===")
         try {
             $open = @{}
-            foreach ($p in 80, 443) {
+            # An explicit http:// target uses port 80 only - probing 443 just adds a misleading "blocked".
+            $isHttpOnly = ($Url -match '^(?i)http://')
+            $ports = if ($isHttpOnly) { @(80) } else { @(80, 443) }
+            foreach ($p in $ports) {
                 $r = Test-TcpPortRaw -HostName $hostName -Port $p
                 $open[$p] = [bool]$r.Open
                 if ($r.Open) { $out.Add(("  {0,-5} direct : OPEN  ({1} ms)" -f $p, $r.Ms)) }
@@ -794,6 +810,10 @@ $PNT_Functions = {
             if ($resolved) {
                 if ($proxyOpen) { $out.Add(("  RESULT         : PASS - the proxy {0}:{1} accepts connections." -f $resolved.Host, $resolved.Port)) }
                 else { $out.Add(("  RESULT         : FAIL - the proxy {0}:{1} cannot be reached, so nothing can be downloaded through it." -f $resolved.Host, $resolved.Port)) }
+            }
+            elseif ($isHttpOnly) {
+                if ($open[80]) { $out.Add("  RESULT         : PASS - 80/tcp is reachable, which is the port this http:// URL uses.") }
+                else { $out.Add("  RESULT         : FAIL - 80/tcp could not be reached.") }
             }
             elseif ($open[443]) { $out.Add("  RESULT         : PASS - 443/tcp is reachable, which is the port the Publisher needs.") }
             elseif ($open[80]) { $out.Add("  RESULT         : FAIL - 80/tcp is open but 443/tcp is blocked, so HTTPS cannot get out.") }
@@ -826,6 +846,11 @@ $PNT_Functions = {
         $out.Add("=== SMB / FILE SHARE : $hostName ===")
         try {
             $out.Add(("  Tested as      : {0}" -f (Get-RunningAccount)))
+            if ([System.Security.Principal.WindowsIdentity]::GetCurrent().IsSystem) {
+                $out.Add("  NOTE           : as SYSTEM this authenticates with the COMPUTER account over NTLM.")
+                $out.Add("                   Only point it at a TRUSTED host - a hostile server on this name could")
+                $out.Add("                   capture or relay the machine credential.")
+            }
 
             # 139 is legacy NetBIOS - reported because 139-only differs from neither, but never what you want.
             $r445 = Test-TcpPortRaw -HostName $hostName -Port 445 -TimeoutMs 5000
@@ -916,6 +941,11 @@ $PNT_Functions = {
         $out.Add("=== RPC / ENDPOINT MAPPER : $hostName ===")
         try {
             $out.Add(("  Tested as      : {0}" -f (Get-RunningAccount)))
+            if ([System.Security.Principal.WindowsIdentity]::GetCurrent().IsSystem) {
+                $out.Add("  NOTE           : as SYSTEM this authenticates with the COMPUTER account over NTLM.")
+                $out.Add("                   Only point it at a TRUSTED host - a hostile server on this name could")
+                $out.Add("                   capture or relay the machine credential.")
+            }
 
             $r135 = Test-TcpPortRaw -HostName $hostName -Port 135 -TimeoutMs 5000
             if ($r135.Open) { $out.Add(("  135/tcp EPM    : OPEN  ({0} ms)" -f $r135.Ms)) }
@@ -1150,6 +1180,14 @@ $PNT_Functions = {
         $u = $null; try { $u = [uri]$Url } catch {}
         $targetHost = if ($u -and $u.Host) { $u.Host } else { $Url }
         $targetPort = if ($u -and $u.Port -gt 0) { $u.Port } else { 443 }
+        # An http:// URL has no TLS on its port, so a handshake test does not apply.
+        if ($Url -match '^(?i)http://') {
+            $out.Add("=== TLS HANDSHAKE : $targetHost ===")
+            $out.Add("  SKIPPED        : the target is an http:// URL, which does not use TLS.")
+            $out.Add("                   Test an https:// URL (or a bare host name) to check the handshake.")
+            $out.Add("  RESULT         : N/A - there is no TLS to test on an http:// target.")
+            return $out
+        }
         # Header first, so this check always produces a section even if what follows fails.
         $out.Add("=== TLS HANDSHAKE : $targetHost`:$targetPort ===")
         $handshakeOk = $false
@@ -2871,23 +2909,50 @@ deleted when the tool closes.
         $json = ($Data | ConvertTo-Json -Compress)
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
         $enc = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $null, 'LocalMachine')
-        [System.IO.File]::WriteAllBytes($Path, $enc)
+
+        # The creating account must keep access or the tool cannot shred the file afterwards.
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $ids = @(
+            (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')),
+            (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')),
+            $me
+        )
+
+        # Lock the ACL down AT CREATION, before any protected bytes exist on disk, so the
+        # blob is never briefly readable under the inherited (default) %TEMP% ACL.
+        $created = $false
         try {
-            $acl = Get-Acl -Path $Path
-            $acl.SetAccessRuleProtection($true, $false)
-            # The creating account must keep access or the tool cannot shred the file afterwards.
-            $ids = @(
-                (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')),
-                (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')),
-                ([System.Security.Principal.WindowsIdentity]::GetCurrent().User)
-            )
-            $acl.SetOwner([System.Security.Principal.WindowsIdentity]::GetCurrent().User)
+            $sec = New-Object System.Security.AccessControl.FileSecurity
+            $sec.SetAccessRuleProtection($true, $false)
+            $sec.SetOwner($me)
             foreach ($id in $ids) {
-                $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($id, 'FullControl', 'Allow')))
+                $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($id, 'FullControl', 'Allow')))
             }
-            Set-Acl -Path $Path -AclObject $acl
+            $fs = [System.IO.File]::Create($Path, 4096, [System.IO.FileOptions]::None, $sec)
+            $fs.Dispose()
+            $created = $true
         }
-        catch {}
+        catch {
+            # Older/edge hosts without the FileSecurity Create overload: create empty, then tighten.
+            $created = $false
+        }
+
+        if (-not $created) {
+            [System.IO.File]::WriteAllBytes($Path, (New-Object byte[] 0))
+            try {
+                $acl = Get-Acl -Path $Path
+                $acl.SetAccessRuleProtection($true, $false)
+                $acl.SetOwner($me)
+                foreach ($id in $ids) {
+                    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($id, 'FullControl', 'Allow')))
+                }
+                Set-Acl -Path $Path -AclObject $acl
+            }
+            catch {}
+        }
+
+        # WriteAllBytes rewrites the contents of the existing file and preserves its ACL.
+        [System.IO.File]::WriteAllBytes($Path, $enc)
     }
 
     function Read-ProtectedParamFile {
@@ -2919,6 +2984,38 @@ deleted when the tool closes.
         }
     }
 
+    # Best-effort: names broad non-admin principals that can modify the script (or its folder)
+    # before it is launched as SYSTEM. A writable script is a SYSTEM code-execution path.
+    function Test-SelfPathTamperRisk {
+        param([string]$Path)
+        $risky = @{ 'S-1-1-0' = 'Everyone'; 'S-1-5-11' = 'Authenticated Users'; 'S-1-5-32-545' = 'Users'; 'S-1-5-4' = 'INTERACTIVE' }
+        $hits = New-Object System.Collections.Generic.List[string]
+        try {
+            $targets = @()
+            if ($Path -and (Test-Path -LiteralPath $Path)) {
+                $targets += $Path
+                $d = Split-Path -LiteralPath $Path -Parent
+                if ($d) { $targets += $d }
+            }
+            foreach ($t in ($targets | Select-Object -Unique)) {
+                $acl = Get-Acl -LiteralPath $t -ErrorAction Stop
+                foreach ($ace in $acl.Access) {
+                    if ($ace.AccessControlType -ne 'Allow') { continue }
+                    if (([string]$ace.FileSystemRights) -notmatch 'Write|Modify|FullControl|CreateFiles|AppendData|Delete|ChangePermissions|TakeOwnership') { continue }
+                    $sid = $null
+                    try { $sid = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }
+                    catch { $sid = [string]$ace.IdentityReference }
+                    if ($risky.ContainsKey($sid)) {
+                        $where = if ($t -eq $Path) { 'the script file' } else { 'the script folder' }
+                        [void]$hits.Add(('{0} is writable by {1}' -f $where, $risky[$sid]))
+                    }
+                }
+            }
+        }
+        catch {}
+        return @($hits | Select-Object -Unique)
+    }
+
     function Invoke-SystemContextTests {
         param([string]$SelfPath, [string]$ExePath, [string[]]$Tests, [string]$Url,
             [string]$Mode, [string]$PHost, [int]$PPort, [string]$PUser, [string]$PPass,
@@ -2943,6 +3040,15 @@ deleted when the tool closes.
         }
 
         try {
+            # This script is about to run as NT AUTHORITY\SYSTEM - warn if its location is not admin-only.
+            $tamper = Test-SelfPathTamperRisk -Path $SelfPath
+            if ($tamper.Count) {
+                '[SYSTEM] WARNING: about to run this script as NT AUTHORITY\SYSTEM, but its location is not protected:'
+                foreach ($h in $tamper) { ('[SYSTEM]          - {0}' -f $h) }
+                '[SYSTEM]          A non-administrator who can change the file could gain SYSTEM code execution.'
+                '[SYSTEM]          Move the tool to an admin-only folder (e.g. under C:\Program Files) before SYSTEM tests.'
+            }
+
             # MultipleInstances=IgnoreNew means starting over a live instance succeeds and starts nothing.
             $prev = Get-SystemTaskState
             if ($prev -and $prev.Running) {
@@ -4321,6 +4427,11 @@ $script:PreconfiguredUrls = @(
     'https://patchmypc.com'
     'https://patchmypc.com/scupcatalog/downloads/publishingservice/supportedproducts.xml'
     'https://api.patchmypc.com'
+    'https://us.portal.patchmypc.com'
+    'https://eu.portal.patchmypc.com'
+    'https://signalr-us.patchmypc.com'
+    'https://signalr-eu.patchmypc.com'
+    'http://timestamp.digicert.com'
     'https://login.microsoftonline.com'
     'https://graph.microsoft.com'
 )
@@ -5875,7 +5986,16 @@ cannot auto-detect (WPAD).
                     [void][System.Windows.Forms.MessageBox]::Show($dlg, 'Enter the proxy address.', 'Edit proxy', 'OK', 'Warning'); return
                 }
                 $server = $tpHost.Text.Trim()
-                if ($tpPort.Text.Trim()) { $server += ':' + $tpPort.Text.Trim() }
+                if ($server -match '\s' -or $server -match '[/\\@]') {
+                    [void][System.Windows.Forms.MessageBox]::Show($dlg, 'The proxy address must be a bare host or IP - no spaces, slashes or "@".', 'Edit proxy', 'OK', 'Warning'); return
+                }
+                $pt = $tpPort.Text.Trim()
+                if ($pt) {
+                    if ($pt -notmatch '^\d+$' -or [int]$pt -lt 1 -or [int]$pt -gt 65535) {
+                        [void][System.Windows.Forms.MessageBox]::Show($dlg, 'The proxy port must be a whole number between 1 and 65535.', 'Edit proxy', 'OK', 'Warning'); return
+                    }
+                    $server += ':' + $pt
+                }
             }
             $byp = @()
             if ($useProxy) {
@@ -5886,6 +6006,9 @@ cannot auto-detect (WPAD).
             $pac = if ($rbPac.Checked) { $tpPac.Text.Trim() } else { '' }
             if ($rbPac.Checked -and -not $pac) {
                 [void][System.Windows.Forms.MessageBox]::Show($dlg, 'Enter the .pac script URL.', 'Edit proxy', 'OK', 'Warning'); return
+            }
+            if ($rbPac.Checked -and $pac -notmatch '^(?i)(https?|ftp|file)://\S+$') {
+                [void][System.Windows.Forms.MessageBox]::Show($dlg, 'The PAC URL must be a full URL, e.g. http://host/proxy.pac', 'Edit proxy', 'OK', 'Warning'); return
             }
 
             $what = if ($rbPac.Checked) { "PAC script $pac" } elseif ($useProxy) { "proxy $server" } else { 'no proxy (direct)' }
@@ -6117,7 +6240,16 @@ function Show-WinHttpEditor {
                     [void][System.Windows.Forms.MessageBox]::Show($dlg, 'Enter the proxy address.', 'Machine WinHTTP', 'OK', 'Warning'); return
                 }
                 $server = $twHost.Text.Trim()
-                if ($twPort.Text.Trim()) { $server += ':' + $twPort.Text.Trim() }
+                if ($server -match '\s' -or $server -match '[/\\@]') {
+                    [void][System.Windows.Forms.MessageBox]::Show($dlg, 'The proxy address must be a bare host or IP - no spaces, slashes or "@".', 'Machine WinHTTP', 'OK', 'Warning'); return
+                }
+                $pt = $twPort.Text.Trim()
+                if ($pt) {
+                    if ($pt -notmatch '^\d+$' -or [int]$pt -lt 1 -or [int]$pt -gt 65535) {
+                        [void][System.Windows.Forms.MessageBox]::Show($dlg, 'The proxy port must be a whole number between 1 and 65535.', 'Machine WinHTTP', 'OK', 'Warning'); return
+                    }
+                    $server += ':' + $pt
+                }
             }
             $byp = @()
             if ($useProxy) {
