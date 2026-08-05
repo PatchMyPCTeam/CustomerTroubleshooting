@@ -107,6 +107,8 @@ It is a **viewer, not a browser**: page scripts are stripped before rendering, f
 
 This is how you catch a captive portal or a proxy block page that returns a perfectly healthy `200 OK`.
 
+<img width="1080" height="832" alt="image" src="https://github.com/user-attachments/assets/60bfd6ad-c7ef-4aef-812b-51b482d172fd" />
+
 ## Testing internal servers and file shares
 
 - **SMB** checks 445 (and legacy 139), then performs a **real session setup**, so you find out about authentication, share ACLs and missing shares, not just whether a socket opens.
