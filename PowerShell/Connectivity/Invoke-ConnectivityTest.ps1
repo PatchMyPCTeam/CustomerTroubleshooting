@@ -88,6 +88,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $script:SelfPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
+# Fingerprint of the file as launched: the SYSTEM task only ever runs a copy that still matches it.
+$script:SelfSha256 = $null
+if (-not $SystemTest) {
+    try { $script:SelfSha256 = (Get-FileHash -LiteralPath $script:SelfPath -Algorithm SHA256 -ErrorAction Stop).Hash } catch {}
+}
 
 # 5.1 does not load these itself: without them HttpClientHandler and ProtectedData are missing.
 foreach ($asm in 'System.Net.Http', 'System.Security') {
@@ -1954,6 +1959,10 @@ $PNT_Functions = {
         $targetHost = if ($u -and $u.Host) { $u.Host } else { $Url }
         $targetPort = if ($u -and $u.Port -gt 0) { $u.Port } else { 443 }
         $chains = @()
+        # Windows fetches certificates, CRLs and OCSP itself through this account's WinINET proxy - never
+        # through a proxy chosen in this tool - so those probes always use WinINET to match.
+        $winInet = $null
+        try { $winInet = Get-EffectiveProxy -Mode System -UseDefaultCreds ([bool]($ProxyObj -and $ProxyObj.UseDefaultCreds)) } catch {}
 
         $out.Add("TLS server certificate:")
         if ($Url -match '^(?i)http://') {
@@ -2047,7 +2056,7 @@ $PNT_Functions = {
             $out.Add("Certificates that would complete the chain:")
             $seen = @{}
             foreach ($ch in $broken) {
-                $fx = @(Get-ChainFixCerts -Result $ch.Result -ProxyObj $ProxyObj -ProxyMode $ProxyMode)
+                $fx = @(Get-ChainFixCerts -Result $ch.Result -ProxyObj $winInet -ProxyMode 'System')
                 $out.Add(("  For            : {0}" -f $ch.Label))
                 if (-not $fx.Count) {
                     $out.Add("      (the missing issuer could not be downloaded from its CA Issuers address)")
@@ -2080,8 +2089,13 @@ $PNT_Functions = {
         $allUrls = @($chains | ForEach-Object { $_.Result.Urls } | Where-Object { $_ } | Sort-Object Url -Unique)
         if ($allUrls.Count) {
             $out.Add("Revocation endpoints (fetched by Windows with this account's WinINET proxy):")
+            $out.Add(("  Proxy          : {0}" -f $(if ($winInet -and $winInet.Desc) { $winInet.Desc } else { 'WinINET settings could not be read' })))
+            if ($ProxyMode -ne 'System') {
+                $out.Add("  NOTE           : the proxy selected in this tool is not used here, because Windows ignores")
+                $out.Add("                   it (as it ignores the proxy set in Publisher) for these requests.")
+            }
             $probe = $null
-            try { $probe = New-CertProbeClient -ProxyObj $ProxyObj -ProxyMode $ProxyMode -TimeoutSec 15 } catch {}
+            try { $probe = New-CertProbeClient -ProxyObj $winInet -ProxyMode 'System' -TimeoutSec 15 } catch {}
             foreach ($e in $allUrls) {
                 $state = ''
                 if ($e.Url -notmatch '^(?i)https?://') { $state = 'skipped - LDAP is not tested' }
@@ -3348,6 +3362,7 @@ deleted when the tool closes.
         $notes = @()
         try { if (Remove-SystemTask) { $notes += 'removed the helper task' } } catch {}
         try { $l = Clear-LegacyTasks; if ($l) { $notes += $l } } catch {}
+        try { if ((Clear-ProtectedScriptCopies) -gt 0) { $notes += 'removed a leftover protected script copy' } } catch {}
         $left = @()
         try { if (Test-Path -LiteralPath (Join-Path $script:TaskDiskRoot $script:TaskName)) { $left += 'the task XML' } } catch {}
         try { if (Test-Path -LiteralPath (Join-Path (Join-Path $script:TaskCacheRoot 'Tree') $script:TaskName)) { $left += 'its TaskCache key' } } catch {}
@@ -3435,42 +3450,101 @@ deleted when the tool closes.
         }
     }
 
-    # Best-effort: names broad non-admin principals that can modify the script (or its folder)
-    # before it is launched as SYSTEM. A writable script is a SYSTEM code-execution path.
-    function Test-SelfPathTamperRisk {
+    # The SYSTEM task never runs the script from where it was launched. It runs a byte-exact copy, hash-checked
+    # against the file as it was when the tool started, in a fresh folder only SYSTEM and Administrators can change.
+    $script:SysCopyPrefix = 'PMPC-ConnTest-'
+    function Get-SysCopyRoot { Join-Path $env:SystemRoot 'Temp' }
+
+    function Get-BytesSha256 {
+        param([byte[]]$Bytes)
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try { return (-join ($sha.ComputeHash($Bytes) | ForEach-Object { $_.ToString('X2') })) } finally { $sha.Dispose() }
+    }
+
+    # Lists anything other than SYSTEM or Administrators that could change the path.
+    function Get-NonAdminWriters {
         param([string]$Path)
-        $risky = @{ 'S-1-1-0' = 'Everyone'; 'S-1-5-11' = 'Authenticated Users'; 'S-1-5-32-545' = 'Users'; 'S-1-5-4' = 'INTERACTIVE' }
-        $hits = New-Object System.Collections.Generic.List[string]
-        try {
-            $targets = @()
-            if ($Path -and (Test-Path -LiteralPath $Path)) {
-                $targets += $Path
-                $d = Split-Path -LiteralPath $Path -Parent
-                if ($d) { $targets += $d }
-            }
-            foreach ($t in ($targets | Select-Object -Unique)) {
-                $acl = Get-Acl -LiteralPath $t -ErrorAction Stop
-                foreach ($ace in $acl.Access) {
-                    if ($ace.AccessControlType -ne 'Allow') { continue }
-                    if (([string]$ace.FileSystemRights) -notmatch 'Write|Modify|FullControl|CreateFiles|AppendData|Delete|ChangePermissions|TakeOwnership') { continue }
-                    $sid = $null
-                    try { $sid = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }
-                    catch { $sid = [string]$ace.IdentityReference }
-                    if ($risky.ContainsKey($sid)) {
-                        $where = if ($t -eq $Path) { 'the script file' } else { 'the script folder' }
-                        [void]$hits.Add(('{0} is writable by {1}' -f $where, $risky[$sid]))
-                    }
-                }
-            }
+        $ok = @('S-1-5-18', 'S-1-5-32-544')
+        $hits = @()
+        $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+        foreach ($ace in $acl.Access) {
+            if ($ace.AccessControlType -ne 'Allow') { continue }
+            if (([string]$ace.FileSystemRights) -notmatch 'Write|Modify|FullControl|CreateFiles|AppendData|Delete|ChangePermissions|TakeOwnership') { continue }
+            $sid = $null
+            try { $sid = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }
+            catch { $sid = [string]$ace.IdentityReference }
+            if ($ok -notcontains $sid) { $hits += [string]$ace.IdentityReference }
         }
-        catch {}
         return @($hits | Select-Object -Unique)
     }
 
+    function New-ProtectedScriptCopy {
+        param([string]$SourcePath, [string]$ExpectedSha256)
+        $bytes = [System.IO.File]::ReadAllBytes($SourcePath)
+        if ($ExpectedSha256 -and (Get-BytesSha256 $bytes) -ne $ExpectedSha256.ToUpperInvariant()) {
+            throw 'the script file has changed on disk since this tool was started. Close the tool and start it again.'
+        }
+        $dir = Join-Path (Get-SysCopyRoot) ($script:SysCopyPrefix + [guid]::NewGuid().ToString('N'))
+        if (Test-Path -LiteralPath $dir) { throw ('{0} already exists.' -f $dir) }
+        $sec = New-Object System.Security.AccessControl.DirectorySecurity
+        $sec.SetAccessRuleProtection($true, $false)
+        foreach ($sid in 'S-1-5-18', 'S-1-5-32-544') {
+            $id = New-Object System.Security.Principal.SecurityIdentifier($sid)
+            $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($id, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+        }
+        $made = $false
+        try { [void][System.IO.Directory]::CreateDirectory($dir, $sec); $made = $true } catch {}
+        if (-not $made) {
+            # pwsh has no CreateDirectory(path, security) overload - lock it before any bytes land.
+            $null = New-Item -ItemType Directory -Path $dir -ErrorAction Stop
+            Set-Acl -LiteralPath $dir -AclObject $sec
+        }
+        $copy = Join-Path $dir (Split-Path -Leaf $SourcePath)
+        [System.IO.File]::WriteAllBytes($copy, $bytes)
+        $bad = @(Get-NonAdminWriters -Path $dir) + @(Get-NonAdminWriters -Path $copy)
+        if ($bad.Count) {
+            Remove-ProtectedScriptCopy -Path $copy
+            throw ('the protected copy could not be locked down ({0} can still change it).' -f (($bad | Select-Object -Unique) -join ', '))
+        }
+        if ((Get-BytesSha256 ([System.IO.File]::ReadAllBytes($copy))) -ne (Get-BytesSha256 $bytes)) {
+            Remove-ProtectedScriptCopy -Path $copy
+            throw 'the protected copy does not match the original.'
+        }
+        return $copy
+    }
+
+    # Only ever touches top-level files in folders this tool names, and never follows a junction.
+    function Remove-ProtectedScriptCopy {
+        param([string]$Path)
+        if (-not $Path) { return }
+        $dir = Split-Path -Parent $Path
+        if ((Split-Path -Parent $dir) -ne (Get-SysCopyRoot) -or (Split-Path -Leaf $dir) -notlike "$($script:SysCopyPrefix)*") { return }
+        try {
+            $di = New-Object System.IO.DirectoryInfo($dir)
+            if (-not $di.Exists -or ($di.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { return }
+            foreach ($fi in $di.GetFiles()) { try { $fi.Delete() } catch {} }
+            $di.Delete($false)
+        }
+        catch {}
+    }
+
+    # Sweeps copies left by a run that was killed part-way.
+    function Clear-ProtectedScriptCopies {
+        $n = 0
+        try {
+            foreach ($d in [System.IO.Directory]::GetDirectories((Get-SysCopyRoot), "$($script:SysCopyPrefix)*")) {
+                Remove-ProtectedScriptCopy -Path (Join-Path $d 'x')
+                if (-not (Test-Path -LiteralPath $d)) { $n++ }
+            }
+        }
+        catch {}
+        return $n
+    }
     function Invoke-SystemContextTests {
         param([string]$SelfPath, [string]$ExePath, [string[]]$Tests, [string]$Url,
             [string]$Mode, [string]$PHost, [int]$PPort, [string]$PUser, [string]$PPass,
             [bool]$UseDefaultCreds = $false,
+            [string]$ExpectedSha256,
             [int]$SelfDeleteMinutes = 60)
         $tmp = [System.IO.Path]::GetTempPath()
         $pf = Join-Path $tmp ('pmpc_ct_{0}.bin' -f ([guid]::NewGuid().ToString('N')))
@@ -3490,16 +3564,8 @@ deleted when the tool closes.
             $ExePath = $winPs
         }
 
+        $runPath = $null
         try {
-            # This script is about to run as NT AUTHORITY\SYSTEM - warn if its location is not admin-only.
-            $tamper = Test-SelfPathTamperRisk -Path $SelfPath
-            if ($tamper.Count) {
-                '[SYSTEM] WARNING: about to run this script as NT AUTHORITY\SYSTEM, but its location is not protected:'
-                foreach ($h in $tamper) { ('[SYSTEM]          - {0}' -f $h) }
-                '[SYSTEM]          A non-administrator who can change the file could gain SYSTEM code execution.'
-                '[SYSTEM]          Move the tool to an admin-only folder (e.g. under C:\Program Files) before SYSTEM tests.'
-            }
-
             # MultipleInstances=IgnoreNew means starting over a live instance succeeds and starts nothing.
             $prev = Get-SystemTaskState
             if ($prev -and $prev.Running) {
@@ -3520,6 +3586,9 @@ deleted when the tool closes.
                 '[SYSTEM] Previous instance stopped.'
             }
 
+            $runPath = Invoke-TaskStep 'making the protected copy of the script' {
+                New-ProtectedScriptCopy -SourcePath $SelfPath -ExpectedSha256 $ExpectedSha256
+            }
             Invoke-TaskStep 'writing the parameter file' {
                 Write-ProtectedParamFile -Data @{
                     Targets = @($Url); Tests = $Tests; ProxyMode = $Mode
@@ -3527,7 +3596,7 @@ deleted when the tool closes.
                     UseDefaultCreds = [bool]$UseDefaultCreds
                 } -Path $pf
             }
-            $arg = ('-NonInteractive -NoProfile -ExecutionPolicy Bypass -File "{0}" -SystemTest -ParamFile "{1}" -OutFile "{2}"' -f $SelfPath, $pf, $of)
+            $arg = ('-NonInteractive -NoProfile -ExecutionPolicy Bypass -File "{0}" -SystemTest -ParamFile "{1}" -OutFile "{2}"' -f $runPath, $pf, $of)
 
             try {
                 $null = Register-SystemTask -ExePath $ExePath -Arguments $arg -SelfDeleteMinutes $SelfDeleteMinutes
@@ -3642,6 +3711,7 @@ deleted when the tool closes.
         finally {
             # Both halves removed as soon as the run ends, or the next run trips over the leftover.
             try { $null = Remove-SystemTask } catch {}
+            Remove-ProtectedScriptCopy -Path $runPath
             Remove-FileSecurely $pf
             Remove-FileSecurely $of
         }
@@ -3662,6 +3732,7 @@ deleted when the tool closes.
             if ($ghost) { $notes += ("Cleared a broken SYSTEM helper task registration ({0})." -f $ghost) }
         }
         try { $lg = Clear-LegacyTasks; if ($lg) { $notes += (($lg.Substring(0, 1).ToUpper() + $lg.Substring(1)) + '.') } } catch {}
+        try { if ((Clear-ProtectedScriptCopies) -gt 0) { $notes += 'Removed a protected script copy left behind by a previous run.' } } catch {}
         if (-not $notes.Count) { return $null }
         return ($notes -join ' ')
     }
@@ -3704,6 +3775,9 @@ deleted when the tool closes.
         $out.Add(("Task name        : {0}" -f $script:TaskName))
         $out.Add("Run as           : S-1-5-18  (NT AUTHORITY\SYSTEM)")
         $out.Add("Logon type       : ServiceAccount      Run level: Highest")
+        $out.Add(("Script run       : a copy in {0}\{1}<guid>, hash-checked against the" -f (Get-SysCopyRoot), $script:SysCopyPrefix))
+        $out.Add("                   file as launched, writable only by SYSTEM and Administrators,")
+        $out.Add("                   and deleted when the run ends.")
         $out.Add(("Trigger          : one DISABLED trigger, valid from registration for {0} minutes" -f $SelfDeleteMinutes))
         $out.Add("                   It can never fire - it exists only to give the task an expiry,")
         $out.Add("                   which is what makes Windows delete the task by itself.")
@@ -5332,7 +5406,7 @@ Add-RailHeading 'Windows server'
 Add-RailTest 'SMB / file share' 'Smb'
 Add-RailTest 'RPC / WMI'        'Rpc'
 $script:RailY += 8
-Add-RailHeading 'TLS'
+Add-RailHeading 'Security'
 Add-RailTest 'Handshake'      'Tls'      -On
 Add-RailTest 'TLS config'     'BoxTls'
 Add-RailTest 'Cipher suites'  'CipherCmp' -Note 'slow'
@@ -6226,28 +6300,34 @@ function Show-SystemInfo {
     $body = New-Object System.Windows.Forms.Label
     $body.Location = '16,40'; $body.AutoSize = $true; $body.MaximumSize = '628,0'
     $body.Text = @"
-The Patch My PC Publishing Service runs as NT AUTHORITY\SYSTEM, and it downloads content using the same .NET and WinINET plumbing as Internet Explorer. Proxy settings, TLS configuration and web-filter policy can all differ between your account and SYSTEM, so a URL that works for you can still fail for the service.
+The Patch My PC Publishing Service runs as NT AUTHORITY\SYSTEM and downloads content with .NET and WinINET, the same components Internet Explorer used. Your account and SYSTEM can have different proxy settings, TLS configuration and web filtering, so a URL that works for you can fail for the service.
 
-Testing as SYSTEM reproduces what the service actually sees. Historically that meant PsExec plus Internet Explorer, which is no longer available on current servers.
+Running the tests as SYSTEM shows what the service sees. This used to be done with PsExec and Internet Explorer, which current servers no longer include.
 "@
 
     $lblH2 = New-SectionLabel -Text 'How this tool does it' -Location '16,196'
     $body2 = New-Object System.Windows.Forms.Label
     $body2.Location = '16,222'; $body2.AutoSize = $true; $body2.MaximumSize = '628,0'
     $body2.Text = @"
-Windows only hands a real SYSTEM token to a service or a scheduled task, so this tool registers a task, runs one batch of tests through it, reads the results back and removes it. No PsExec, and nothing is installed.
+Windows only runs code as SYSTEM from a service or a scheduled task. This tool registers a scheduled task, runs the tests through it, reads the results and deletes the task. PsExec is not used and nothing is installed.
 
     Task     \$($script:TaskName)
     Runs     NT AUTHORITY\SYSTEM, highest privileges, only when you press a test button
+    Script   a hash-checked copy in a folder only SYSTEM and Administrators can change
     Trigger  disabled, so Windows never starts it on its own
-    Expiry   self-deletes 60 minutes after it is created
+    Expiry   deleted by Windows 60 minutes after it is created
 
-The task is removed when this tool closes, swept up on the next launch if the tool was killed, and deleted by Windows at expiry regardless. Deletion is guarded by a marker in the task description, so a task of the same name that this tool did not create is never touched.
+The task is deleted after each run and when the tool closes. If the tool is killed, the next launch removes it. The tool only deletes a task with its own marker in the description, so other tasks with the same name are left alone.
 
-Parameters are passed in a DPAPI-encrypted, ACL-restricted file that is overwritten and deleted afterwards, so a proxy password is never written to disk in clear. Running the task by hand produces nothing.
+Test settings are passed in an encrypted file that only SYSTEM and Administrators can read. The file is overwritten and deleted after the run, so a proxy password is never stored in plain text. Running the task manually does nothing.
 
-Registering a task as NT AUTHORITY\SYSTEM needs local administrator rights, which is why this option requires an elevated session.
+Creating a SYSTEM task needs local administrator rights, so this option needs an elevated session.
 "@
+
+    $lblImp = New-Object System.Windows.Forms.Label
+    $lblImp.AutoSize = $true; $lblImp.MaximumSize = '628,0'; $lblImp.Location = '16,0'
+    $lblImp.Font = New-Object System.Drawing.Font($script:UiFont, [System.Drawing.FontStyle]::Bold)
+    $lblImp.Text = 'Important: save the script to a folder only administrators can change, such as C:\Program Files.'
 
     $btnOk = New-ActionButton 'Close' 88 26
     $btnOk.Add_Click({ $script:SysInfoDlg.Close() })
@@ -6270,15 +6350,18 @@ Registering a task as NT AUTHORITY\SYSTEM needs local administrator rights, whic
             $script:SysInfoDlg.Close()
         })
 
-    $dlg.Controls.AddRange(@($lblH, $body, $lblH2, $body2, $btnOpenTs, $btnOk))
+    $dlg.Controls.AddRange(@($lblH, $body, $lblH2, $body2, $lblImp, $btnOpenTs, $btnOk))
     $lblH2.Top = $body.Bottom + 20
     $body2.Top = $lblH2.Bottom + 8
-    $dlg.ClientSize = New-Object System.Drawing.Size(660, ($body2.Bottom + 66))
-    $btnOk.Location = New-Object System.Drawing.Point((660 - $btnOk.Width - 16), ($body2.Bottom + 20))
+    $lblImp.Top = $body2.Bottom + 4
+    $dlg.ClientSize = New-Object System.Drawing.Size(660, ($lblImp.Bottom + 66))
+    $btnOk.Location = New-Object System.Drawing.Point((660 - $btnOk.Width - 16), ($lblImp.Bottom + 20))
     $btnOk.Anchor = 'Bottom,Right'
-    $btnOpenTs.Location = New-Object System.Drawing.Point(16, ($body2.Bottom + 20))
+    $btnOpenTs.Location = New-Object System.Drawing.Point(16, ($lblImp.Bottom + 20))
     $btnOpenTs.Anchor = 'Bottom,Left'
     Set-ControlTheme $dlg
+    # After theming, which would otherwise repaint it as ordinary bold text.
+    $lblImp.ForeColor = $script:Pal.Warning
     $dlg.Add_FormClosed({ $script:SysInfoDlg = $null })
     [void]$dlg.ShowDialog($form)
 }
@@ -6936,16 +7019,16 @@ function Invoke-Ctx {
     if ($script:Acct -eq 'SYSTEM') { $script:SystemTaskUsed = $true }
     $pp = Get-ProxyParams
     Start-Task -Name ("{0} [{1}]" -f $Name, $script:Acct) -Target $Target -Kind $Kind -Total @($Tests).Count -Work {
-        param($Acct, $Tests, $SelfPath, $ExePath, $Url, $Mode, $PHost, $PPort, $PUser, $PPass, $UseDefaultCreds, $MaxFetchChars)
+        param($Acct, $Tests, $SelfPath, $SelfSha256, $ExePath, $Url, $Mode, $PHost, $PPort, $PUser, $PPass, $UseDefaultCreds, $MaxFetchChars)
         if ($Acct -eq 'SYSTEM') {
-            Invoke-SystemContextTests -SelfPath $SelfPath -ExePath $ExePath -Tests $Tests -Url $Url -Mode $Mode -PHost $PHost -PPort $PPort -PUser $PUser -PPass $PPass -UseDefaultCreds $UseDefaultCreds
+            Invoke-SystemContextTests -SelfPath $SelfPath -ExpectedSha256 $SelfSha256 -ExePath $ExePath -Tests $Tests -Url $Url -Mode $Mode -PHost $PHost -PPort $PPort -PUser $PUser -PPass $PPass -UseDefaultCreds $UseDefaultCreds
         }
         else {
             $proxy = Get-EffectiveProxy -Mode $Mode -PHost $PHost -PPort $PPort -PUser $PUser -PPass $PPass -UseDefaultCreds $UseDefaultCreds
             Invoke-RequestedTests -Tests $Tests -Url $Url -ProxyObj $proxy -ProxyMode $Mode -MaxFetchChars $MaxFetchChars
         }
     } -Params @{
-        Acct = $script:Acct; Tests = $Tests; SelfPath = $script:SelfPath; ExePath = (Get-Process -Id $PID).Path
+        Acct = $script:Acct; Tests = $Tests; SelfPath = $script:SelfPath; SelfSha256 = $script:SelfSha256; ExePath = (Get-Process -Id $PID).Path
         Url = $cboTarget.Text; Mode = $pp.Mode; PHost = $pp.PHost; PPort = $pp.PPort; PUser = $pp.PUser; PPass = $pp.PPass
         UseDefaultCreds = $pp.UseDefaultCreds; MaxFetchChars = $script:MaxFetchChars
     }
