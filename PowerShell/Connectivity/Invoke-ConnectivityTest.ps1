@@ -1206,8 +1206,15 @@ $PNT_Functions = {
                     return $true
                 }
                 $script:__certErr = $null
+                # The one-argument overload uses the .NET Framework default (SSL3/TLS 1.0 when
+                # SchUseStrongCrypto is not set), which fails where TLS 1.0 is disabled in SChannel.
+                # Request the same TLS 1.2/1.3 set as the HTTP checks instead.
+                $hsProtos = [System.Security.Authentication.SslProtocols]::Tls12
+                if ([enum]::GetNames([System.Security.Authentication.SslProtocols]) -contains 'Tls13') {
+                    $hsProtos = $hsProtos -bor [System.Security.Authentication.SslProtocols]::Tls13
+                }
                 $ssl = New-Object System.Net.Security.SslStream($conn.Stream, $false, $cb)
-                $ssl.AuthenticateAsClient($targetHost)
+                $ssl.AuthenticateAsClient($targetHost, $null, $hsProtos, $false)
                 $handshakeOk = $true
                 $out.Add(("  Negotiated     : {0}" -f $ssl.SslProtocol))
                 $cipherLine = $null
@@ -1243,7 +1250,14 @@ $PNT_Functions = {
                     $out.Add(("     {0,-7}: YES" -f $name))
                     $ssl2.Dispose()
                 }
-                catch { $out.Add(("     {0,-7}: no" -f $name)) }
+                catch {
+                    $pex = $_.Exception; while ($pex.InnerException) { $pex = $pex.InnerException }
+                    # SEC_E_UNSUPPORTED_FUNCTION: the protocol is disabled on this machine, so the server was never asked.
+                    if (($pex -is [System.ComponentModel.Win32Exception] -and $pex.NativeErrorCode -eq -2146893054) -or $pex.Message -match 'function requested is not supported') {
+                        $out.Add(("     {0,-7}: not tested (disabled on this machine)" -f $name))
+                    }
+                    else { $out.Add(("     {0,-7}: no" -f $name)) }
+                }
                 finally { if ($c2) { try { $c2.Tcp.Close() } catch {} } }
             }
         }
