@@ -68,6 +68,7 @@ The dropdown is pre-populated with the endpoints the Publishing Service uses. If
 | TLS | **Handshake** | Negotiated protocol and cipher, certificate chain validation |
 | | **TLS config** | What SCHANNEL has enabled on this box |
 | | **Cipher suites** | What the server accepts vs what this box offers, side by side *(slow)* |
+| | **Cert trust** | Builds the TLS certificate chain — and for `.cab`/`.msi`/`.exe`/`.msu`/`.msp`/`.dll` URLs the file's Authenticode signing and timestamp chains — with online revocation. Reports where each root is trusted, probes every CRL/OCSP/AIA endpoint, checks for DigiCert Trusted Root G4 and the *Turn off Automatic Root Certificates Update* policy. When a chain is untrusted, the missing root or intermediate is saved and can be opened from the result card; for `https://*.patchmypc.com` addresses reached over an already-trusted TLS chain it can also be installed (elevated) into Trusted Root or Intermediate Certification Authorities. Maps to [Troubleshoot Certificate Trust and Revocation Checks](https://docs.patchmypc.com/patch-my-pc-publisher/troubleshoot/certificate-trust-revocation-checks) *(slow)* |
 | Configuration | **DNS config** | Resolvers, suffixes, and the HOSTS entries relevant to the target |
 
 ### Automatic Test Selection
