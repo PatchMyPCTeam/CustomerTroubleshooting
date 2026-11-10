@@ -25,6 +25,9 @@ Internet Explorer has been removed from modern Windows Server builds, and PsExec
 | PowerShell | **Windows PowerShell 5.1** |
 | Elevation | Only needed for the **SYSTEM** context and for editing machine-wide proxy settings |
 
+> [!IMPORTANT]
+> Save the script to a folder only administrators can change, such as `C:\Program Files\Patch My PC`. Don't run it from a shared or public folder such as `C:\Temp`.
+
 ## Quick start
 
 ```powershell
@@ -65,9 +68,10 @@ The dropdown is pre-populated with the endpoints the Publishing Service uses. If
 | | **Nslookup** | Name resolution and which resolver answered |
 | Windows server | **SMB / file share** | 445 and 139, then a real session — auth, share ACLs, dialect |
 | | **RPC / WMI** | 135, the dynamic port range, a real DCOM connect, and `root\sms` |
-| TLS | **Handshake** | Negotiated protocol and cipher, certificate chain validation |
+| Security | **Handshake** | Negotiated protocol and cipher, certificate chain validation |
 | | **TLS config** | What SCHANNEL has enabled on this box |
 | | **Cipher suites** | What the server accepts vs what this box offers, side by side *(slow)* |
+| | **Cert trust** | Builds the TLS certificate chain — and for `.cab`/`.msi`/`.exe`/`.msu`/`.msp`/`.dll` URLs the file's Authenticode signing and timestamp chains — with online revocation. Reports where each root is trusted, probes every CRL/OCSP/AIA endpoint through the account's WinINet proxy (as Windows does, whatever proxy is selected in the tool or in Publisher), checks for DigiCert Trusted Root G4 and the *Turn off Automatic Root Certificates Update* policy. When a chain is untrusted, the missing root or intermediate is saved and can be opened from the result card; for `https://*.patchmypc.com` addresses reached over an already-trusted TLS chain it can also be installed (elevated) into Trusted Root or Intermediate Certification Authorities. Maps to [Troubleshoot Certificate Trust and Revocation Checks](https://docs.patchmypc.com/patch-my-pc-publisher/troubleshoot/certificate-trust-revocation-checks) *(slow)* |
 | Configuration | **DNS config** | Resolvers, suffixes, and the HOSTS entries relevant to the target |
 
 ### Automatic Test Selection
@@ -137,5 +141,7 @@ Every check resolves the proxy from the registry **at the moment it runs**
 No PsExec. The tool registers a **one-shot Scheduled Task** in the root of the Task Scheduler Library, runs it as `NT AUTHORITY\SYSTEM`, streams the results back live, then deletes the task **and its registry entries**.
 
 - Run parameters are written to a file only SYSTEM and Administrators can read, DPAPI-encrypted at machine scope, and securely overwritten afterwards.
+- The task never runs the script from where you saved it. Each run copies it into a new `%SystemRoot%\Temp\PMPC-ConnTest-<guid>` folder that only SYSTEM and Administrators can change, checks the copy's SHA-256 against the file as it was when the tool started, and deletes the copy when the run ends. If the original has changed since launch, the SYSTEM run is refused.
 - The task is registered disabled, with an expiring trigger and `DeleteExpiredTaskAfter`, so nothing survives a crash.
 - The tool only ever touches a task carrying its own marker in the description.
+- **Important:** save the script to a folder only administrators can change, such as `C:\Program Files`.

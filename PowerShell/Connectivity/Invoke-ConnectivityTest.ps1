@@ -15,6 +15,10 @@
       TCP ports        80 and 443, direct and through the proxy
       TLS handshake    negotiated protocol and cipher, certificate chain validation
       Cipher matrix    what the server accepts vs what SCHANNEL offers on this box
+      Cert trust       TLS and (for .cab/.msi/.exe files) Authenticode chains built with
+                       online revocation, root trust per store, CRL/OCSP reachability;
+                       saves any missing root/intermediate to open (or, for patchmypc.com,
+                       install) from the result card
       Ping / Tracert / Nslookup
       DNS config       resolvers, suffixes and the relevant HOSTS entries
       SMB              445/139, then a real session - share ACLs, auth, dialect
@@ -84,6 +88,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $script:SelfPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
+# Fingerprint of the file as launched: the SYSTEM task only ever runs a copy that still matches it.
+$script:SelfSha256 = $null
+if (-not $SystemTest) {
+    try { $script:SelfSha256 = (Get-FileHash -LiteralPath $script:SelfPath -Algorithm SHA256 -ErrorAction Stop).Hash } catch {}
+}
 
 # 5.1 does not load these itself: without them HttpClientHandler and ProtectedData are missing.
 foreach ($asm in 'System.Net.Http', 'System.Security') {
@@ -1193,6 +1202,7 @@ $PNT_Functions = {
         $handshakeOk = $false
         $certErr = $null
         $hsError = $null
+        $hsVersionRefused = $false
         try {
             $resolved = Resolve-ProxyForUri -ProxyObj $ProxyObj.Proxy -Uri ("https://{0}" -f $targetHost)
             if ($resolved) { $out.Add(("  via proxy      : {0}:{1} (CONNECT)" -f $resolved.Host, $resolved.Port)) }
@@ -1206,8 +1216,15 @@ $PNT_Functions = {
                     return $true
                 }
                 $script:__certErr = $null
+                # The one-argument overload uses the .NET Framework default, which is SSL3/TLS 1.0 only
+                # when SchUseStrongCrypto is not set, and TLS 1.2+ servers then reject the handshake.
+                # Request the same TLS 1.2/1.3 set as the HTTP checks instead.
+                $hsProtos = [System.Security.Authentication.SslProtocols]::Tls12
+                if ([enum]::GetNames([System.Security.Authentication.SslProtocols]) -contains 'Tls13') {
+                    $hsProtos = $hsProtos -bor [System.Security.Authentication.SslProtocols]::Tls13
+                }
                 $ssl = New-Object System.Net.Security.SslStream($conn.Stream, $false, $cb)
-                $ssl.AuthenticateAsClient($targetHost)
+                $ssl.AuthenticateAsClient($targetHost, $null, $hsProtos, $false)
                 $handshakeOk = $true
                 $out.Add(("  Negotiated     : {0}" -f $ssl.SslProtocol))
                 $cipherLine = $null
@@ -1228,7 +1245,12 @@ $PNT_Functions = {
                 else { $out.Add("  Cert validation: OK (trusted)") }
                 $ssl.Dispose()
             }
-            catch { $ex = $_.Exception; while ($ex.InnerException) { $ex = $ex.InnerException }; $hsError = $ex.Message; $out.Add(("  ERROR          : {0}" -f $ex.Message)) }
+            catch {
+                $ex = $_.Exception; while ($ex.InnerException) { $ex = $ex.InnerException }
+                $hsError = $ex.Message; $out.Add(("  ERROR          : {0}" -f $ex.Message))
+                # SEC_E_UNSUPPORTED_FUNCTION here is SChannel's mapping of the server's protocol_version alert.
+                if ($ex -is [System.ComponentModel.Win32Exception] -and $ex.NativeErrorCode -eq -2146893054) { $hsVersionRefused = $true }
+            }
             finally { if ($conn) { try { $conn.Tcp.Close() } catch {} } }
 
             $protos = @{ 'Tls1.0' = 'Tls'; 'Tls1.1' = 'Tls11'; 'Tls1.2' = 'Tls12' }
@@ -1252,7 +1274,15 @@ $PNT_Functions = {
             if (-not $hsError) { $hsError = $ex.Message }
             $out.Add(("  ERROR          : {0}" -f $ex.Message))
         }
-        if (-not $handshakeOk) { $out.Add(("  RESULT         : FAIL - the TLS handshake did not complete ({0})." -f $hsError)) }
+        if (-not $handshakeOk) {
+            $out.Add(("  RESULT         : FAIL - the TLS handshake did not complete ({0})." -f $hsError))
+            if ($hsVersionRefused) {
+                $out.Add("  CAUSE          : no TLS version was agreed. This machine offered TLS 1.2/1.3 and the")
+                $out.Add("                   server refused them, or this OS cannot offer the version the server")
+                $out.Add("                   requires (e.g. a TLS 1.3-only server). Compare 'Server accepts' above")
+                $out.Add("                   with the protocol settings shown by 'TLS config'.")
+            }
+        }
         elseif ($certErr) { $out.Add(("  RESULT         : WARN - the handshake worked but the certificate did not validate ({0})." -f $certErr)) }
         else { $out.Add("  RESULT         : PASS - the TLS handshake completed and the certificate is trusted.") }
         return $out
@@ -1645,6 +1675,7 @@ $PNT_Functions = {
         }
         $out.Add("Protocols (SCHANNEL, Client):")
         $base = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols'
+        $protoState = @{}
         foreach ($proto in 'TLS 1.0', 'TLS 1.1', 'TLS 1.2', 'TLS 1.3') {
             $k = Join-Path $base ("{0}\Client" -f $proto)
             $state = 'OS default'
@@ -1660,17 +1691,33 @@ $PNT_Functions = {
                 }
             }
             catch { }
+            $protoState[$proto] = $state
             $out.Add(("  {0,-8}: {1}" -f $proto, $state))
         }
         $out.Add(".NET strong-crypto (affects .NET Framework 4.x applications):")
+        $weakHives = New-Object System.Collections.Generic.List[string]
         foreach ($p in 'HKLM:\SOFTWARE\Microsoft\.NETFramework\v4.0.30319', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\.NETFramework\v4.0.30319') {
             try {
                 $ssc = (Get-ItemProperty $p -Name SchUseStrongCrypto -ErrorAction SilentlyContinue).SchUseStrongCrypto
                 $sd = (Get-ItemProperty $p -Name SystemDefaultTlsVersions -ErrorAction SilentlyContinue).SystemDefaultTlsVersions
                 $out.Add(("  {0}" -f $p))
                 $out.Add(("     SchUseStrongCrypto={0}  SystemDefaultTlsVersions={1}" -f $(if ($null -ne $ssc) { $ssc }else { '<unset>' }), $(if ($null -ne $sd) { $sd }else { '<unset>' })))
+                if ((Test-Path $p) -and $ssc -ne 1 -and $sd -ne 1) { $weakHives.Add($(if ($p -match 'WOW6432Node') { '32-bit' } else { '64-bit' })) }
             }
             catch { }
+        }
+        # Without either value, .NET Framework apps that do not pick a version themselves offer only SSL3/TLS 1.0.
+        if ($weakHives.Count) {
+            $out.Add(("WARNING: neither SchUseStrongCrypto nor SystemDefaultTlsVersions is set for {0} .NET." -f ($weakHives -join ' and ')))
+            $out.Add("         .NET Framework applications and PowerShell 5.1 scripts that do not choose a TLS")
+            $out.Add("         version themselves offer only SSL3/TLS 1.0, so servers that require TLS 1.2+")
+            $out.Add("         refuse them ('The function requested is not supported' or 'Could not create")
+            $out.Add("         SSL/TLS secure channel'). Fix: set SchUseStrongCrypto=1 and SystemDefaultTlsVersions=1")
+            $out.Add("         (DWORD) under the key(s) above, then restart the affected application or service.")
+        }
+        if ($protoState['TLS 1.2'] -eq 'DISABLED' -and $protoState['TLS 1.3'] -ne 'Enabled') {
+            $out.Add("WARNING: TLS 1.2 is disabled for SChannel clients, so HTTPS to most modern services will")
+            $out.Add("         fail. Set Enabled=1 and DisabledByDefault=0 on the TLS 1.2\Client key and reboot.")
         }
         $out.Add("Cipher-suite restriction policy:")
         $anyPol = $false
@@ -1709,6 +1756,423 @@ $PNT_Functions = {
             else { $out.Add("  (none returned)") }
         }
         catch { $out.Add("  Get-TlsCipherSuite not available on this OS: $($_.Exception.Message)") }
+        return $out
+    }
+
+    # CRL, OCSP and issuer-certificate URLs from one certificate's extensions.
+    function Get-CertRevocationUrls {
+        param([System.Security.Cryptography.X509Certificates.X509Certificate2]$Cert)
+        $res = @()
+        foreach ($ext in $Cert.Extensions) {
+            $oid = $ext.Oid.Value
+            if ($oid -ne '2.5.29.31' -and $oid -ne '1.3.6.1.5.5.7.1.1') { continue }
+            $txt = ''; try { $txt = $ext.Format($true) } catch {}
+            # One "[n]..." block per entry; the AIA access-method OID survives localisation.
+            foreach ($seg in ($txt -split '(?=\[\d+\])')) {
+                # Up to end of line: Microsoft AIA URLs contain literal spaces.
+                foreach ($m in [regex]::Matches($seg, '(?i)\b(?:https?|ldap)://[^\r\n]+')) {
+                    $kind = if ($oid -eq '2.5.29.31') { 'CRL' }
+                    elseif ($seg -match '1\.3\.6\.1\.5\.5\.7\.48\.1') { 'OCSP' }
+                    elseif ($seg -match '1\.3\.6\.1\.5\.5\.7\.48\.2') { 'CA cert' }
+                    elseif ($m.Value -match '(?i)ocsp') { 'OCSP' } else { 'CA cert' }
+                    # Windows renders some as "raw url (escaped url)" - keep the escaped one.
+                    $link = $m.Value.Trim()
+                    if ($link -match '\s\(((?:https?|ldap)://[^\s]+?)\)?$') { $link = $Matches[1] }
+                    $res += [pscustomobject]@{ Kind = $kind; Url = $link.TrimEnd(')', '.', ',') }
+                }
+            }
+        }
+        return $res
+    }
+
+    # Where a root is trusted. CurrentUser\Root also shows machine roots, so test the machine first.
+    function Find-CertRootStore {
+        param([string]$Thumbprint)
+        $hits = @()
+        foreach ($loc in @(
+                @('LocalMachine', 'Root', 'Local Computer\Trusted Root'),
+                @('LocalMachine', 'AuthRoot', 'Local Computer\Third-Party Root'),
+                @('CurrentUser', 'Root', 'Current User\Trusted Root'))) {
+            $st = $null
+            try {
+                $st = New-Object System.Security.Cryptography.X509Certificates.X509Store($loc[1], $loc[0])
+                $st.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+                if (@($st.Certificates.Find([System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint, $Thumbprint, $false)).Count) { $hits += $loc[2] }
+            }
+            catch { }
+            finally { if ($st) { $st.Close() } }
+        }
+        return $hits
+    }
+
+    # The chain build Publisher does for the catalog: online revocation for every certificate in the chain.
+    function Test-CertChain {
+        param([System.Security.Cryptography.X509Certificates.X509Certificate2]$Cert, $Out, [switch]$Timestamped,
+            [System.Security.Cryptography.X509Certificates.X509Certificate2Collection]$ExtraStore)
+        $r = [pscustomobject]@{ Untrusted = $false; Partial = $false; Revoked = $false; RevUnknown = $false; Other = @(); Root = $null; Urls = @(); Last = $null; ExtraStore = $ExtraStore }
+        $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+        # Intermediates the server sent / the signature carries, as Windows sees them during the real check.
+        if ($ExtraStore -and $ExtraStore.Count) { [void]$chain.ChainPolicy.ExtraStore.AddRange($ExtraStore) }
+        $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::Online
+        $chain.ChainPolicy.RevocationFlag = [System.Security.Cryptography.X509Certificates.X509RevocationFlag]::EntireChain
+        $chain.ChainPolicy.UrlRetrievalTimeout = [TimeSpan]::FromSeconds(15)
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        try { [void]$chain.Build($Cert) } catch { $r.Other += $_.Exception.Message }
+        $Out.Add(("  Chain build    : {0} ms (Windows may answer revocation from its cache)" -f $sw.ElapsedMilliseconds))
+        $n = $chain.ChainElements.Count
+        for ($i = 0; $i -lt $n; $i++) {
+            $el = $chain.ChainElements[$i]
+            $c = $el.Certificate
+            $isLast = ($i -eq $n - 1)
+            $role = if ($i -eq 0) { 'leaf' } elseif ($isLast -and $c.Subject -eq $c.Issuer) { 'root' } else { 'intermediate' }
+            $flags = @($el.ChainElementStatus | ForEach-Object { [string]$_.Status } | Where-Object { $_ -and $_ -ne 'NoError' })
+            # A timestamped signature stays valid after the certificate expires.
+            if ($Timestamped) { $flags = @($flags | Where-Object { $_ -ne 'NotTimeValid' }) }
+            $Out.Add(("  [{0}] {1,-12} : {2}" -f $i, $role, $c.Subject))
+            $Out.Add(("      Thumbprint     : {0}   expires {1:yyyy-MM-dd}" -f $c.Thumbprint, $c.NotAfter))
+            $Out.Add(("      Status         : {0}" -f $(if ($flags.Count) { $flags -join ', ' } else { 'OK' })))
+            if ($isLast) {
+                $r.Root = $c.Subject
+                $r.Last = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($c)
+                $where = @(Find-CertRootStore -Thumbprint $c.Thumbprint)
+                $machine = @($where | Where-Object { $_ -like 'Local Computer*' })
+                if ($machine.Count) { $Out.Add(("      Trusted in     : {0}" -f ($machine -join ', '))) }
+                elseif ($where.Count) { $Out.Add("      Trusted in     : Current User ONLY - SYSTEM and services do not trust it") }
+                elseif ($role -eq 'root') { $Out.Add("      Trusted in     : NOT in any trusted root store on this machine") }
+                else { $Out.Add("      Trusted in     : (chain stops before a root - the issuer could not be found)") }
+            }
+            foreach ($f in $flags) {
+                switch ($f) {
+                    'Revoked' { $r.Revoked = $true }
+                    'UntrustedRoot' { $r.Untrusted = $true }
+                    'PartialChain' { $r.Partial = $true }
+                    'RevocationStatusUnknown' { $r.RevUnknown = $true }
+                    'OfflineRevocation' { $r.RevUnknown = $true }
+                    default { $r.Other += $f }
+                }
+            }
+            $r.Urls += @(Get-CertRevocationUrls -Cert $c)
+        }
+        foreach ($cs in $chain.ChainStatus) {
+            $s = [string]$cs.Status
+            if ($s -eq 'PartialChain') { $r.Partial = $true }
+            elseif ($s -eq 'UntrustedRoot') { $r.Untrusted = $true }
+            elseif ($s -eq 'Revoked') { $r.Revoked = $true }
+            elseif ($s -eq 'RevocationStatusUnknown' -or $s -eq 'OfflineRevocation') { $r.RevUnknown = $true }
+        }
+        $r.Other = @($r.Other | Select-Object -Unique)
+        try { $chain.Reset() } catch {}
+        return $r
+    }
+
+    function New-CertProbeClient {
+        param($ProxyObj, [string]$ProxyMode, [int]$TimeoutSec)
+        $handler = New-Object System.Net.Http.HttpClientHandler
+        $handler.AllowAutoRedirect = $true
+        switch ($ProxyMode) {
+            'None' { $handler.UseProxy = $false }
+            'System' { $handler.UseProxy = $true; $handler.Proxy = $null }
+            'Explicit' { $handler.UseProxy = $true; $handler.Proxy = $ProxyObj.Proxy }
+        }
+        if ($ProxyObj -and $ProxyObj.UseDefaultCreds) {
+            try { $handler.UseDefaultCredentials = $true } catch {}
+            try { $handler.DefaultProxyCredentials = [System.Net.CredentialCache]::DefaultNetworkCredentials } catch {}
+        }
+        $client = New-Object System.Net.Http.HttpClient($handler)
+        $client.Timeout = [TimeSpan]::FromSeconds($TimeoutSec)
+        try { $client.DefaultRequestHeaders.UserAgent.ParseAdd($script:HttpUserAgent) } catch {}
+        return $client
+    }
+
+    # Does $Issuer's key verify $Child's signature? Built against only the candidate, no revocation.
+    function Test-CertIssuedBy {
+        param([System.Security.Cryptography.X509Certificates.X509Certificate2]$Child,
+            [System.Security.Cryptography.X509Certificates.X509Certificate2]$Issuer)
+        $ch = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+        try {
+            $ch.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+            $ch.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::AllowUnknownCertificateAuthority
+            [void]$ch.ChainPolicy.ExtraStore.Add($Issuer)
+            [void]$ch.Build($Child)
+            if ($ch.ChainElements.Count -lt 2) { return $false }
+            if ($ch.ChainElements[1].Certificate.Thumbprint -ne $Issuer.Thumbprint) { return $false }
+            foreach ($i in 0, 1) {
+                foreach ($s in $ch.ChainElements[$i].ChainElementStatus) { if ([string]$s.Status -eq 'NotSignatureValid') { return $false } }
+            }
+            return $true
+        }
+        catch { return $false }
+        finally { try { $ch.Reset() } catch {} }
+    }
+
+    # The certificates that would complete an untrusted chain: the untrusted root itself, or the
+    # missing issuers fetched from each "CA Issuers" address and kept only if they really signed it.
+    function Get-ChainFixCerts {
+        param($Result, $ProxyObj, [string]$ProxyMode)
+        $fix = @()
+        $cur = $Result.Last
+        if (-not $cur) { return $fix }
+        if ($cur.Subject -eq $cur.Issuer) {
+            if ($Result.Untrusted) { $fix += $cur }
+            return $fix
+        }
+        $client = $null
+        try { $client = New-CertProbeClient -ProxyObj $ProxyObj -ProxyMode $ProxyMode -TimeoutSec 15 } catch { return $fix }
+        try {
+            for ($d = 0; $d -lt 4 -and $cur.Subject -ne $cur.Issuer; $d++) {
+                $next = $null
+                foreach ($e in @(Get-CertRevocationUrls -Cert $cur | Where-Object { $_.Kind -eq 'CA cert' -and $_.Url -match '^(?i)https?://' })) {
+                    try {
+                        $bytes = $client.GetByteArrayAsync($e.Url).GetAwaiter().GetResult()
+                        $coll = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection
+                        $coll.Import($bytes)
+                        foreach ($cand in $coll) {
+                            if ($cand.Subject -eq $cur.Issuer -and (Test-CertIssuedBy -Child $cur -Issuer $cand)) { $next = $cand; break }
+                        }
+                    }
+                    catch {}
+                    if ($next) { break }
+                }
+                if (-not $next) { break }
+                $fix += $next; $cur = $next
+            }
+        }
+        finally { if ($client) { try { $client.Dispose() } catch {} } }
+        return $fix
+    }
+
+    # SYSTEM runs save beside the parent's output file, which the logged-on user can read.
+    function Save-CertFile {
+        param([System.Security.Cryptography.X509Certificates.X509Certificate2]$Cert)
+        $dir = if ($script:CertSaveDir -and (Test-Path -LiteralPath $script:CertSaveDir)) { $script:CertSaveDir } else { [System.IO.Path]::GetTempPath() }
+        $path = Join-Path $dir ('pmpc-cert-{0}.cer' -f $Cert.Thumbprint)
+        [System.IO.File]::WriteAllBytes($path, $Cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+        return $path
+    }
+
+    # Certificate trust and revocation, as described in the Publisher "certificate trust and revocation" guide.
+    function Invoke-CertTrustTest {
+        param([string]$Url, $ProxyObj, [string]$ProxyMode = 'System', [long]$MaxBytes = 314572800)
+        $out = New-Object System.Collections.Generic.List[string]
+        $out.Add("=== CERTIFICATE TRUST : $Url ===")
+        $u = $null; try { $u = [uri]$Url } catch {}
+        $targetHost = if ($u -and $u.Host) { $u.Host } else { $Url }
+        $targetPort = if ($u -and $u.Port -gt 0) { $u.Port } else { 443 }
+        $chains = @()
+        # Windows fetches certificates, CRLs and OCSP itself through this account's WinINET proxy - never
+        # through a proxy chosen in this tool - so those probes always use WinINET to match.
+        $winInet = $null
+        try { $winInet = Get-EffectiveProxy -Mode System -UseDefaultCreds ([bool]($ProxyObj -and $ProxyObj.UseDefaultCreds)) } catch {}
+
+        $out.Add("TLS server certificate:")
+        if ($Url -match '^(?i)http://') {
+            $out.Add("  Skipped        : an http:// URL has no TLS certificate.")
+        }
+        else {
+            $conn = $null
+            try {
+                $resolved = Resolve-ProxyForUri -ProxyObj $ProxyObj.Proxy -Uri ("https://{0}" -f $targetHost)
+                $conn = Open-TargetStream -TargetHost $targetHost -TargetPort $targetPort -ResolvedProxy $resolved
+                $protos = [System.Security.Authentication.SslProtocols]::Tls12
+                if ([enum]::GetNames([System.Security.Authentication.SslProtocols]) -contains 'Tls13') {
+                    $protos = $protos -bor [System.Security.Authentication.SslProtocols]::Tls13
+                }
+                $sent = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection
+                $cb = {
+                    param($a, $b, $c, $d)
+                    if ($c) { foreach ($el in $c.ChainElements) { [void]$sent.Add((New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($el.Certificate))) } }
+                    $true
+                }.GetNewClosure()
+                $ssl = New-Object System.Net.Security.SslStream($conn.Stream, $false, ([System.Net.Security.RemoteCertificateValidationCallback]$cb))
+                $ssl.AuthenticateAsClient($targetHost, $null, $protos, $false)
+                $leaf = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($ssl.RemoteCertificate)
+                $ssl.Dispose()
+                $chains += [pscustomobject]@{ Label = 'TLS certificate'; Result = (Test-CertChain -Cert $leaf -Out $out -ExtraStore $sent) }
+            }
+            catch {
+                $ex = $_.Exception; while ($ex.InnerException) { $ex = $ex.InnerException }
+                $out.Add(("  ERROR          : could not fetch the certificate - {0}" -f $ex.Message))
+                $out.Add("                     Run 'Handshake' for the full TLS diagnosis.")
+            }
+            finally { if ($conn) { try { $conn.Tcp.Close() } catch {} } }
+        }
+
+        $signedExt = @('.cab', '.msi', '.exe', '.msu', '.msp', '.dll')
+        $ext = ''
+        try { $ext = [System.IO.Path]::GetExtension(([uri]$Url).AbsolutePath).ToLowerInvariant() } catch {}
+        $sigFailed = $false
+        if ($signedExt -contains $ext) {
+            $out.Add("Authenticode signature of the file:")
+            $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('pmpc-certtest-{0}{1}' -f [guid]::NewGuid().ToString('N'), $ext)
+            $client = $null; $resp = $null; $src = $null; $fs = $null
+            try {
+                $client = New-CertProbeClient -ProxyObj $ProxyObj -ProxyMode $ProxyMode -TimeoutSec 180
+                $resp = $client.GetAsync($Url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+                if (-not $resp.IsSuccessStatusCode) { throw ("HTTP {0} {1} - run 'File download' for detail" -f [int]$resp.StatusCode, $resp.ReasonPhrase) }
+                $src = $resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+                $fs = [System.IO.File]::Create($tmp)
+                $buf = New-Object byte[] 81920
+                $total = 0L
+                while (($n = $src.Read($buf, 0, $buf.Length)) -gt 0) {
+                    $fs.Write($buf, 0, $n); $total += $n
+                    if ($total -gt $MaxBytes) { throw ("the file is larger than the {0} MB cap" -f [int]($MaxBytes / 1MB)) }
+                }
+                $fs.Dispose(); $fs = $null
+                $out.Add(("  Downloaded     : {0:N1} MB (deleted after the check)" -f ($total / 1MB)))
+                $sig = Get-AuthenticodeSignature -FilePath $tmp -ErrorAction Stop
+                $out.Add(("  Signature      : {0} - {1}" -f $sig.Status, $sig.StatusMessage))
+                if ($sig.Status -eq 'HashMismatch') { $sigFailed = $true }
+                if ($sig.SignerCertificate) {
+                    $embedded = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection
+                    try { $embedded.Import($tmp) } catch {}
+                    $ts = [bool]$sig.TimeStamperCertificate
+                    $out.Add(("  Signed by      : {0}" -f $sig.SignerCertificate.Subject))
+                    $chains += [pscustomobject]@{ Label = 'Signing certificate'; Result = (Test-CertChain -Cert $sig.SignerCertificate -Out $out -Timestamped:$ts -ExtraStore $embedded) }
+                    if ($ts) {
+                        $out.Add(("  Timestamped by : {0}" -f $sig.TimeStamperCertificate.Subject))
+                        $chains += [pscustomobject]@{ Label = 'Timestamp certificate'; Result = (Test-CertChain -Cert $sig.TimeStamperCertificate -Out $out -Timestamped -ExtraStore $embedded) }
+                    }
+                    else { $out.Add("  Timestamp      : none - the signature stops being valid when the certificate expires") }
+                }
+            }
+            catch {
+                $ex = $_.Exception; while ($ex.InnerException) { $ex = $ex.InnerException }
+                $out.Add(("  ERROR          : {0}" -f $ex.Message))
+            }
+            finally {
+                if ($fs) { try { $fs.Dispose() } catch {} }
+                if ($src) { try { $src.Dispose() } catch {} }
+                if ($resp) { try { $resp.Dispose() } catch {} }
+                if ($client) { try { $client.Dispose() } catch {} }
+                if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+            }
+        }
+
+        # Install is only offered for Patch My PC addresses reached over a TLS chain this box already
+        # trusts - so the certificates provably came from PMPC, not from something in the middle.
+        $fixCount = 0
+        $broken = @($chains | Where-Object { $_.Result.Untrusted -or $_.Result.Partial })
+        if ($broken.Count) {
+            $out.Add("Certificates that would complete the chain:")
+            $seen = @{}
+            foreach ($ch in $broken) {
+                $fx = @(Get-ChainFixCerts -Result $ch.Result -ProxyObj $winInet -ProxyMode 'System')
+                $out.Add(("  For            : {0}" -f $ch.Label))
+                if (-not $fx.Count) {
+                    $out.Add("      (the missing issuer could not be downloaded from its CA Issuers address)")
+                    continue
+                }
+                foreach ($c in $fx) {
+                    $self = ($c.Subject -eq $c.Issuer)
+                    $out.Add(("  {0,-14} : {1}" -f $(if ($self) { '[root]' } else { '[intermediate]' }), $c.Subject))
+                    $out.Add(("      Thumbprint     : {0}   expires {1:yyyy-MM-dd}" -f $c.Thumbprint, $c.NotAfter))
+                    if ($seen.ContainsKey($c.Thumbprint)) { continue }
+                    $seen[$c.Thumbprint] = $true
+                    try { $out.Add(("      Saved as       : {0}" -f (Save-CertFile -Cert $c))); $fixCount++ }
+                    catch { $out.Add(("      Saved as       : (could not be written - {0})" -f $_.Exception.Message)) }
+                    $out.Add(("      Belongs in     : Local Computer\{0}" -f $(if ($self) { 'Trusted Root Certification Authorities' } else { 'Intermediate Certification Authorities' })))
+                }
+            }
+            $tlsChain = @($chains | Where-Object { $_.Label -eq 'TLS certificate' })
+            $tlsTrusted = $tlsChain.Count -and -not ($tlsChain[0].Result.Untrusted -or $tlsChain[0].Result.Partial -or $tlsChain[0].Result.Revoked)
+            $why = if (-not $fixCount) { 'no certificate was saved' }
+            elseif (-not ($u -and $u.Host -match '(?i)(^|\.)patchmypc\.com$')) { 'only offered for patchmypc.com addresses - deploy it by policy after checking it' }
+            elseif ($u.Scheme -ne 'https') { 'needs an https:// address, so the source can be verified' }
+            elseif (-not $tlsTrusted) { 'the TLS chain to patchmypc.com is itself untrusted (TLS inspection?) - deploy that root by policy' }
+            else { $null }
+            if ($why) { $out.Add(("  Install        : not offered - {0}" -f $why)) }
+            else { $out.Add("  Install        : offered - served by patchmypc.com over a trusted TLS connection") }
+        }
+
+        # Probe what Windows itself must reach: Publisher's proxy setting is not used for these.
+        $badUrls = @()
+        $allUrls = @($chains | ForEach-Object { $_.Result.Urls } | Where-Object { $_ } | Sort-Object Url -Unique)
+        if ($allUrls.Count) {
+            $out.Add("Revocation endpoints (fetched by Windows with this account's WinINET proxy):")
+            $out.Add(("  Proxy          : {0}" -f $(if ($winInet -and $winInet.Desc) { $winInet.Desc } else { 'WinINET settings could not be read' })))
+            if ($ProxyMode -ne 'System') {
+                $out.Add("  NOTE           : the proxy selected in this tool is not used here, because Windows ignores")
+                $out.Add("                   it (as it ignores the proxy set in Publisher) for these requests.")
+            }
+            $probe = $null
+            try { $probe = New-CertProbeClient -ProxyObj $winInet -ProxyMode 'System' -TimeoutSec 15 } catch {}
+            foreach ($e in $allUrls) {
+                $state = ''
+                if ($e.Url -notmatch '^(?i)https?://') { $state = 'skipped - LDAP is not tested' }
+                elseif (-not $probe) { $state = 'not tested - no HTTP client' }
+                else {
+                    $r = $null
+                    try {
+                        $r = $probe.GetAsync($e.Url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+                        $code = [int]$r.StatusCode
+                        # A bare GET to an OCSP responder is not a real query, so 400/405 still proves it is reachable.
+                        if ($code -lt 400 -or ($e.Kind -eq 'OCSP' -and ($code -eq 400 -or $code -eq 405))) { $state = "reachable (HTTP $code)" }
+                        else { $state = "BLOCKED? HTTP $code $($r.ReasonPhrase)"; $badUrls += $e.Url }
+                    }
+                    catch {
+                        $ex = $_.Exception; while ($ex.InnerException) { $ex = $ex.InnerException }
+                        $state = "UNREACHABLE - $($ex.Message)"; $badUrls += $e.Url
+                    }
+                    finally { if ($r) { try { $r.Dispose() } catch {} } }
+                }
+                $out.Add(("  {0,-8}: {1}" -f $e.Kind, $e.Url))
+                $out.Add(("            {0}" -f $state))
+            }
+            if ($probe) { try { $probe.Dispose() } catch {} }
+        }
+
+        $out.Add("Machine trust settings:")
+        $g4 = @(Find-CertRootStore -Thumbprint 'DDFB16CD4931C973A2037D3FC83A4D7D775D05E4' | Where-Object { $_ -like 'Local Computer*' })
+        $out.Add(("  DigiCert Trusted Root G4 : {0}" -f $(if ($g4.Count) { 'present (' + ($g4 -join ', ') + ')' } else { 'MISSING from the Local Computer root stores' })))
+        $noAuto = $false
+        try { $noAuto = ((Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\SystemCertificates\AuthRoot' -Name DisableRootAutoUpdate -ErrorAction Stop).DisableRootAutoUpdate -eq 1) } catch {}
+        $out.Add(("  Automatic root update    : {0}" -f $(if ($noAuto) { "DISABLED by policy ('Turn off Automatic Root Certificates Update')" } else { 'allowed' })))
+        if (-not $g4.Count) {
+            $out.Add("  DigiCert Trusted Root G4 is the root of the Patch My PC catalog and Publisher MSI signatures.")
+            if ($noAuto) { $out.Add("  With automatic root update disabled, Windows cannot fetch it - it must be deployed.") }
+            else { $out.Add("  Windows can still fetch it on demand from Windows Update, if that is reachable.") }
+        }
+
+        $any = { param($p) @($chains | Where-Object { $_.Result.$p }).Count -gt 0 }
+        $names = { param($p) (@($chains | Where-Object { $_.Result.$p } | ForEach-Object { $_.Label }) -join ', ') }
+        if (-not $chains.Count) {
+            $out.Add("  RESULT         : FAIL - no certificate could be retrieved to check.")
+        }
+        elseif (& $any 'Revoked') {
+            $out.Add(("  RESULT         : FAIL - a certificate in the chain is REVOKED ({0})." -f (& $names 'Revoked')))
+        }
+        elseif ((& $any 'Untrusted') -or (& $any 'Partial')) {
+            $badChains = @($chains | Where-Object { $_.Result.Untrusted -or $_.Result.Partial })
+            $out.Add(("  RESULT         : FAIL - no trusted chain could be built ({0})." -f (($badChains | ForEach-Object { $_.Label }) -join ', ')))
+            $out.Add("                   This is 'Chain build failed: UntrustedRoot' (Issue 1 in the Publisher guide).")
+            $out.Add(("                   Chain ends at: {0}" -f ((@($badChains | ForEach-Object { $_.Result.Root } | Select-Object -Unique)) -join '; ')))
+            $out.Add("                   Deploy that root to Local Computer > Trusted Root Certification Authorities,")
+            $out.Add("                   then re-run - revocation results are not meaningful until the chain is trusted.")
+            if ($fixCount) { $out.Add("                   The missing certificate is saved above - use 'Open certificate' on this card to inspect it.") }
+        }
+        elseif ($sigFailed) {
+            $out.Add("  RESULT         : FAIL - the file's signature does not match its content (HashMismatch).")
+        }
+        elseif (& $any 'RevUnknown') {
+            $out.Add(("  RESULT         : WARN - revocation could not be checked ({0})." -f (& $names 'RevUnknown')))
+            $out.Add("                   This is 'Offline Revocation' (Issue 2 in the Publisher guide): the certificates")
+            $out.Add("                   are not known to be revoked, but Windows could not reach the CRL/OCSP endpoints.")
+            if ($badUrls.Count) { $out.Add(("                   Allow outbound HTTP (port 80) to: {0}" -f (($badUrls | ForEach-Object { ([uri]$_).Host } | Select-Object -Unique) -join ', '))) }
+        }
+        elseif ($badUrls.Count) {
+            $out.Add("  RESULT         : WARN - the chain is trusted and not revoked, but some revocation endpoints are")
+            $out.Add("                   unreachable. The check likely passed from Windows' cache, which expires.")
+            $out.Add(("                   Allow outbound HTTP (port 80) to: {0}" -f (($badUrls | ForEach-Object { ([uri]$_).Host } | Select-Object -Unique) -join ', ')))
+        }
+        elseif (-not $g4.Count -and $noAuto) {
+            $out.Add("  RESULT         : WARN - this URL's chains are fine, but DigiCert Trusted Root G4 is missing and")
+            $out.Add("                   automatic root update is disabled: Patch My PC catalog and Publisher MSI")
+            $out.Add("                   signatures will fail with UntrustedRoot (Issue 1). Deploy that root to")
+            $out.Add("                   Local Computer > Trusted Root Certification Authorities.")
+        }
+        else {
+            $out.Add("  RESULT         : PASS - every chain is trusted on this machine and revocation was checked.")
+        }
         return $out
     }
 
@@ -2487,7 +2951,7 @@ public static void Notify() {
             ProxyView = 'PROXY CONFIGURATION'; DnsCfg = 'DNS CONFIGURATION'; Http = 'HTTP(S) GET'
             Ports = 'TCP PORT TEST'; Ping = 'PING'; Tracert = 'TRACEROUTE'
             Dns = 'DNS LOOKUP'; Tls = 'TLS HANDSHAKE'; BoxTls = 'THIS MACHINE - TLS'
-            CipherCmp = 'CIPHER COMPARISON'; Fetch = 'PAGE FETCH'; Download = 'FILE DOWNLOAD'
+            CipherCmp = 'CIPHER COMPARISON'; Fetch = 'PAGE FETCH'; Download = 'FILE DOWNLOAD'; CertRev = 'CERTIFICATE TRUST'
             Smb = 'SMB / FILE SHARE'; Rpc = 'RPC / ENDPOINT MAPPER'
         }
         foreach ($t in $Tests) {
@@ -2506,6 +2970,7 @@ public static void Notify() {
                     'Tls' { Get-SslInfo -Url $Url -ProxyObj $ProxyObj }
                     'BoxTls' { Get-BoxTlsConfig }
                     'CipherCmp' { Get-CipherMatrix -Url $Url -ProxyObj $ProxyObj }
+                    'CertRev' { Invoke-CertTrustTest -Url $Url -ProxyObj $ProxyObj -ProxyMode $ProxyMode }
                     'Fetch' {
                         # Returns the body between markers so the Browser tab can render what THIS account received.
                         $c = Get-HttpContent -Url $Url -ProxyObj $ProxyObj -ProxyMode $ProxyMode -TimeoutSec 25 -MaxChars $MaxFetchChars
@@ -2897,6 +3362,7 @@ deleted when the tool closes.
         $notes = @()
         try { if (Remove-SystemTask) { $notes += 'removed the helper task' } } catch {}
         try { $l = Clear-LegacyTasks; if ($l) { $notes += $l } } catch {}
+        try { if ((Clear-ProtectedScriptCopies) -gt 0) { $notes += 'removed a leftover protected script copy' } } catch {}
         $left = @()
         try { if (Test-Path -LiteralPath (Join-Path $script:TaskDiskRoot $script:TaskName)) { $left += 'the task XML' } } catch {}
         try { if (Test-Path -LiteralPath (Join-Path (Join-Path $script:TaskCacheRoot 'Tree') $script:TaskName)) { $left += 'its TaskCache key' } } catch {}
@@ -2984,42 +3450,101 @@ deleted when the tool closes.
         }
     }
 
-    # Best-effort: names broad non-admin principals that can modify the script (or its folder)
-    # before it is launched as SYSTEM. A writable script is a SYSTEM code-execution path.
-    function Test-SelfPathTamperRisk {
+    # The SYSTEM task never runs the script from where it was launched. It runs a byte-exact copy, hash-checked
+    # against the file as it was when the tool started, in a fresh folder only SYSTEM and Administrators can change.
+    $script:SysCopyPrefix = 'PMPC-ConnTest-'
+    function Get-SysCopyRoot { Join-Path $env:SystemRoot 'Temp' }
+
+    function Get-BytesSha256 {
+        param([byte[]]$Bytes)
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try { return (-join ($sha.ComputeHash($Bytes) | ForEach-Object { $_.ToString('X2') })) } finally { $sha.Dispose() }
+    }
+
+    # Lists anything other than SYSTEM or Administrators that could change the path.
+    function Get-NonAdminWriters {
         param([string]$Path)
-        $risky = @{ 'S-1-1-0' = 'Everyone'; 'S-1-5-11' = 'Authenticated Users'; 'S-1-5-32-545' = 'Users'; 'S-1-5-4' = 'INTERACTIVE' }
-        $hits = New-Object System.Collections.Generic.List[string]
-        try {
-            $targets = @()
-            if ($Path -and (Test-Path -LiteralPath $Path)) {
-                $targets += $Path
-                $d = Split-Path -LiteralPath $Path -Parent
-                if ($d) { $targets += $d }
-            }
-            foreach ($t in ($targets | Select-Object -Unique)) {
-                $acl = Get-Acl -LiteralPath $t -ErrorAction Stop
-                foreach ($ace in $acl.Access) {
-                    if ($ace.AccessControlType -ne 'Allow') { continue }
-                    if (([string]$ace.FileSystemRights) -notmatch 'Write|Modify|FullControl|CreateFiles|AppendData|Delete|ChangePermissions|TakeOwnership') { continue }
-                    $sid = $null
-                    try { $sid = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }
-                    catch { $sid = [string]$ace.IdentityReference }
-                    if ($risky.ContainsKey($sid)) {
-                        $where = if ($t -eq $Path) { 'the script file' } else { 'the script folder' }
-                        [void]$hits.Add(('{0} is writable by {1}' -f $where, $risky[$sid]))
-                    }
-                }
-            }
+        $ok = @('S-1-5-18', 'S-1-5-32-544')
+        $hits = @()
+        $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+        foreach ($ace in $acl.Access) {
+            if ($ace.AccessControlType -ne 'Allow') { continue }
+            if (([string]$ace.FileSystemRights) -notmatch 'Write|Modify|FullControl|CreateFiles|AppendData|Delete|ChangePermissions|TakeOwnership') { continue }
+            $sid = $null
+            try { $sid = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }
+            catch { $sid = [string]$ace.IdentityReference }
+            if ($ok -notcontains $sid) { $hits += [string]$ace.IdentityReference }
         }
-        catch {}
         return @($hits | Select-Object -Unique)
     }
 
+    function New-ProtectedScriptCopy {
+        param([string]$SourcePath, [string]$ExpectedSha256)
+        $bytes = [System.IO.File]::ReadAllBytes($SourcePath)
+        if ($ExpectedSha256 -and (Get-BytesSha256 $bytes) -ne $ExpectedSha256.ToUpperInvariant()) {
+            throw 'the script file has changed on disk since this tool was started. Close the tool and start it again.'
+        }
+        $dir = Join-Path (Get-SysCopyRoot) ($script:SysCopyPrefix + [guid]::NewGuid().ToString('N'))
+        if (Test-Path -LiteralPath $dir) { throw ('{0} already exists.' -f $dir) }
+        $sec = New-Object System.Security.AccessControl.DirectorySecurity
+        $sec.SetAccessRuleProtection($true, $false)
+        foreach ($sid in 'S-1-5-18', 'S-1-5-32-544') {
+            $id = New-Object System.Security.Principal.SecurityIdentifier($sid)
+            $sec.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($id, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+        }
+        $made = $false
+        try { [void][System.IO.Directory]::CreateDirectory($dir, $sec); $made = $true } catch {}
+        if (-not $made) {
+            # pwsh has no CreateDirectory(path, security) overload - lock it before any bytes land.
+            $null = New-Item -ItemType Directory -Path $dir -ErrorAction Stop
+            Set-Acl -LiteralPath $dir -AclObject $sec
+        }
+        $copy = Join-Path $dir (Split-Path -Leaf $SourcePath)
+        [System.IO.File]::WriteAllBytes($copy, $bytes)
+        $bad = @(Get-NonAdminWriters -Path $dir) + @(Get-NonAdminWriters -Path $copy)
+        if ($bad.Count) {
+            Remove-ProtectedScriptCopy -Path $copy
+            throw ('the protected copy could not be locked down ({0} can still change it).' -f (($bad | Select-Object -Unique) -join ', '))
+        }
+        if ((Get-BytesSha256 ([System.IO.File]::ReadAllBytes($copy))) -ne (Get-BytesSha256 $bytes)) {
+            Remove-ProtectedScriptCopy -Path $copy
+            throw 'the protected copy does not match the original.'
+        }
+        return $copy
+    }
+
+    # Only ever touches top-level files in folders this tool names, and never follows a junction.
+    function Remove-ProtectedScriptCopy {
+        param([string]$Path)
+        if (-not $Path) { return }
+        $dir = Split-Path -Parent $Path
+        if ((Split-Path -Parent $dir) -ne (Get-SysCopyRoot) -or (Split-Path -Leaf $dir) -notlike "$($script:SysCopyPrefix)*") { return }
+        try {
+            $di = New-Object System.IO.DirectoryInfo($dir)
+            if (-not $di.Exists -or ($di.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { return }
+            foreach ($fi in $di.GetFiles()) { try { $fi.Delete() } catch {} }
+            $di.Delete($false)
+        }
+        catch {}
+    }
+
+    # Sweeps copies left by a run that was killed part-way.
+    function Clear-ProtectedScriptCopies {
+        $n = 0
+        try {
+            foreach ($d in [System.IO.Directory]::GetDirectories((Get-SysCopyRoot), "$($script:SysCopyPrefix)*")) {
+                Remove-ProtectedScriptCopy -Path (Join-Path $d 'x')
+                if (-not (Test-Path -LiteralPath $d)) { $n++ }
+            }
+        }
+        catch {}
+        return $n
+    }
     function Invoke-SystemContextTests {
         param([string]$SelfPath, [string]$ExePath, [string[]]$Tests, [string]$Url,
             [string]$Mode, [string]$PHost, [int]$PPort, [string]$PUser, [string]$PPass,
             [bool]$UseDefaultCreds = $false,
+            [string]$ExpectedSha256,
             [int]$SelfDeleteMinutes = 60)
         $tmp = [System.IO.Path]::GetTempPath()
         $pf = Join-Path $tmp ('pmpc_ct_{0}.bin' -f ([guid]::NewGuid().ToString('N')))
@@ -3039,16 +3564,8 @@ deleted when the tool closes.
             $ExePath = $winPs
         }
 
+        $runPath = $null
         try {
-            # This script is about to run as NT AUTHORITY\SYSTEM - warn if its location is not admin-only.
-            $tamper = Test-SelfPathTamperRisk -Path $SelfPath
-            if ($tamper.Count) {
-                '[SYSTEM] WARNING: about to run this script as NT AUTHORITY\SYSTEM, but its location is not protected:'
-                foreach ($h in $tamper) { ('[SYSTEM]          - {0}' -f $h) }
-                '[SYSTEM]          A non-administrator who can change the file could gain SYSTEM code execution.'
-                '[SYSTEM]          Move the tool to an admin-only folder (e.g. under C:\Program Files) before SYSTEM tests.'
-            }
-
             # MultipleInstances=IgnoreNew means starting over a live instance succeeds and starts nothing.
             $prev = Get-SystemTaskState
             if ($prev -and $prev.Running) {
@@ -3069,6 +3586,9 @@ deleted when the tool closes.
                 '[SYSTEM] Previous instance stopped.'
             }
 
+            $runPath = Invoke-TaskStep 'making the protected copy of the script' {
+                New-ProtectedScriptCopy -SourcePath $SelfPath -ExpectedSha256 $ExpectedSha256
+            }
             Invoke-TaskStep 'writing the parameter file' {
                 Write-ProtectedParamFile -Data @{
                     Targets = @($Url); Tests = $Tests; ProxyMode = $Mode
@@ -3076,7 +3596,7 @@ deleted when the tool closes.
                     UseDefaultCreds = [bool]$UseDefaultCreds
                 } -Path $pf
             }
-            $arg = ('-NonInteractive -NoProfile -ExecutionPolicy Bypass -File "{0}" -SystemTest -ParamFile "{1}" -OutFile "{2}"' -f $SelfPath, $pf, $of)
+            $arg = ('-NonInteractive -NoProfile -ExecutionPolicy Bypass -File "{0}" -SystemTest -ParamFile "{1}" -OutFile "{2}"' -f $runPath, $pf, $of)
 
             try {
                 $null = Register-SystemTask -ExePath $ExePath -Arguments $arg -SelfDeleteMinutes $SelfDeleteMinutes
@@ -3191,6 +3711,7 @@ deleted when the tool closes.
         finally {
             # Both halves removed as soon as the run ends, or the next run trips over the leftover.
             try { $null = Remove-SystemTask } catch {}
+            Remove-ProtectedScriptCopy -Path $runPath
             Remove-FileSecurely $pf
             Remove-FileSecurely $of
         }
@@ -3211,6 +3732,7 @@ deleted when the tool closes.
             if ($ghost) { $notes += ("Cleared a broken SYSTEM helper task registration ({0})." -f $ghost) }
         }
         try { $lg = Clear-LegacyTasks; if ($lg) { $notes += (($lg.Substring(0, 1).ToUpper() + $lg.Substring(1)) + '.') } } catch {}
+        try { if ((Clear-ProtectedScriptCopies) -gt 0) { $notes += 'Removed a protected script copy left behind by a previous run.' } } catch {}
         if (-not $notes.Count) { return $null }
         return ($notes -join ' ')
     }
@@ -3253,6 +3775,9 @@ deleted when the tool closes.
         $out.Add(("Task name        : {0}" -f $script:TaskName))
         $out.Add("Run as           : S-1-5-18  (NT AUTHORITY\SYSTEM)")
         $out.Add("Logon type       : ServiceAccount      Run level: Highest")
+        $out.Add(("Script run       : a copy in {0}\{1}<guid>, hash-checked against the" -f (Get-SysCopyRoot), $script:SysCopyPrefix))
+        $out.Add("                   file as launched, writable only by SYSTEM and Administrators,")
+        $out.Add("                   and deleted when the run ends.")
         $out.Add(("Trigger          : one DISABLED trigger, valid from registration for {0} minutes" -f $SelfDeleteMinutes))
         $out.Add("                   It can never fire - it exists only to give the task an expiry,")
         $out.Add("                   which is what makes Windows delete the task by itself.")
@@ -3373,6 +3898,7 @@ if ($SystemTest) {
         $tests = if ($p -and $p.Tests) { @($p.Tests) }  else { @('ProxyView', 'Http') }
         $maxCh = if ($p -and $p.MaxFetchChars) { [int]$p.MaxFetchChars } else { 524288 }
         $useDc = [bool]($p -and $p.UseDefaultCreds)
+        if ($OutFile) { $script:CertSaveDir = Split-Path -Parent $OutFile }
 
         # Resolving the proxy can mean a WPAD probe: slow, and the most likely thing to stall as a service.
         $lines.Add("Resolving the proxy for this account...")
@@ -4880,10 +5406,11 @@ Add-RailHeading 'Windows server'
 Add-RailTest 'SMB / file share' 'Smb'
 Add-RailTest 'RPC / WMI'        'Rpc'
 $script:RailY += 8
-Add-RailHeading 'TLS'
+Add-RailHeading 'Security'
 Add-RailTest 'Handshake'      'Tls'      -On
 Add-RailTest 'TLS config'     'BoxTls'
 Add-RailTest 'Cipher suites'  'CipherCmp' -Note 'slow'
+Add-RailTest 'Cert trust' 'CertRev' -Note 'slow'
 $script:RailY += 8
 Add-RailHeading 'Configuration'
 Add-RailTest 'DNS config'     'DnsCfg'
@@ -5380,6 +5907,67 @@ function Get-MonoCell {
     return $script:MonoCell
 }
 
+# The Windows certificate viewer, which also carries its own "Install Certificate" wizard.
+function Open-CertFile {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        [void][System.Windows.Forms.MessageBox]::Show($form, ("The certificate file is no longer there:`r`n{0}`r`n`r`nRun 'Cert trust' again." -f $Path), 'Open certificate', 'OK', 'Warning')
+        return
+    }
+    try { Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\rundll32.exe') -ArgumentList ('cryptext.dll,CryptExtOpenCER "{0}"' -f $Path) -ErrorAction Stop }
+    catch {
+        try { Invoke-Item -LiteralPath $Path -ErrorAction Stop }
+        catch { [void][System.Windows.Forms.MessageBox]::Show($form, $_.Exception.Message, 'Open certificate', 'OK', 'Error') }
+    }
+}
+
+# Only reachable from a card whose check offered it (patchmypc.com over a trusted TLS chain).
+function Install-ChainCerts {
+    param([string[]]$Files)
+    $cap = 'Install certificate'
+    if (-not $script:IsAdmin) {
+        [void][System.Windows.Forms.MessageBox]::Show($form, 'Installing into the Local Computer certificate stores needs an elevated session. Re-launch this tool as administrator.', $cap, 'OK', 'Warning')
+        return
+    }
+    $plan = @()
+    foreach ($f in $Files) {
+        try {
+            $c = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($f)
+            # The check names each file after its thumbprint; anything else was swapped since.
+            if ([System.IO.Path]::GetFileNameWithoutExtension($f) -ne ('pmpc-cert-{0}' -f $c.Thumbprint)) { throw 'the file no longer matches the certificate the check saved' }
+            $isRoot = ($c.Subject -eq $c.Issuer)
+            $plan += [pscustomobject]@{
+                Cert  = $c
+                Store = $(if ($isRoot) { 'Root' } else { 'CA' })
+                Desc  = $(if ($isRoot) { 'Trusted Root Certification Authorities' } else { 'Intermediate Certification Authorities' })
+            }
+        }
+        catch {
+            [void][System.Windows.Forms.MessageBox]::Show($form, ("{0}`r`n`r`n{1}" -f $f, $_.Exception.Message), $cap, 'OK', 'Error')
+            return
+        }
+    }
+    $list = ($plan | ForEach-Object { "{0}`r`n    Thumbprint : {1}`r`n    Store      : Local Computer\{2}" -f $_.Cert.Subject, $_.Cert.Thumbprint, $_.Desc }) -join "`r`n`r`n"
+    $msg = "Install into the Local Computer certificate stores of this machine?`r`n`r`n{0}`r`n`r`nThese were served by patchmypc.com over a TLS connection this machine already trusts. This fixes this machine only - deploy them by Group Policy or Intune for the rest." -f $list
+    if ([System.Windows.Forms.MessageBox]::Show($form, $msg, $cap, 'YesNo', 'Warning') -ne 'Yes') { return }
+    $done = @(); $errs = @()
+    foreach ($p in $plan) {
+        $st = $null
+        try {
+            $st = New-Object System.Security.Cryptography.X509Certificates.X509Store($p.Store, 'LocalMachine')
+            $st.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+            $st.Add($p.Cert)
+            $done += $p.Cert.GetNameInfo('SimpleName', $false)
+        }
+        catch { $errs += ('{0}: {1}' -f $p.Cert.GetNameInfo('SimpleName', $false), $_.Exception.Message) }
+        finally { if ($st) { $st.Close() } }
+    }
+    $txt = ''
+    if ($done.Count) { $txt += ("Installed: {0}`r`n`r`nRun 'Cert trust' again to confirm the chain now builds." -f ($done -join ', ')) }
+    if ($errs.Count) { $txt += ("`r`n`r`nFailed:`r`n{0}" -f ($errs -join "`r`n")) }
+    [void][System.Windows.Forms.MessageBox]::Show($form, $txt.Trim(), $cap, 'OK', $(if ($errs.Count) { 'Error' } else { 'Information' }))
+}
+
 # Created collapsed; expanding just changes the height, which the FlowLayoutPanel re-flows.
 function New-ResultCard {
     param([string]$Title, [string[]]$Lines, [string]$Status)
@@ -5409,6 +5997,35 @@ function New-ResultCard {
     $cv.Anchor = 'Top,Left'
 
     $hd.Controls.AddRange(@($chip, $nm, $cv))
+
+    # Cert trust cards save the certificates that would complete a broken chain - offer them here.
+    $certFiles = @($Lines | ForEach-Object { if ("$_" -match '^\s*Saved as\s*:\s*(.+\.cer)\s*$') { $Matches[1] } } | Select-Object -Unique)
+    if ($certFiles.Count) {
+        $bx = 80 + [System.Windows.Forms.TextRenderer]::MeasureText($Title, $script:UiFontBold).Width + 16
+        foreach ($cf in $certFiles) {
+            $nmTxt = ''
+            try { $nmTxt = (New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($cf)).GetNameInfo('SimpleName', $false) } catch {}
+            if ($nmTxt.Length -gt 30) { $nmTxt = $nmTxt.Substring(0, 29) + '...' }
+            $ob = New-ActionButton $(if ($nmTxt) { "Open: $nmTxt" } else { 'Open certificate' }) 88 26
+            Style-Button $ob 'tertiary'
+            $ob.Location = New-Object System.Drawing.Point($bx, 9)
+            $ob.Tag = $cf
+            $ob.Add_Click({ Open-CertFile -Path ([string]$this.Tag) })
+            $hd.Controls.Add($ob)
+            $bx = $ob.Right + 8
+        }
+        # Re-checked here from the card title rather than trusting the check's own text alone.
+        $offered = (($Lines -join "`n") -match '(?m)^\s*Install\s*:\s*offered') -and
+        ($Title -match '(?i)^\s*CERTIFICATE TRUST\s*:\s*https://([^/:\s]+)') -and ($Matches[1] -match '(?i)(^|\.)patchmypc\.com$')
+        if ($offered) {
+            $ib = New-ActionButton $(if ($certFiles.Count -eq 1) { 'Install certificate' } else { 'Install certificates' }) 88 26
+            Style-Button $ib 'secondary'
+            $ib.Location = New-Object System.Drawing.Point($bx, 9)
+            $ib.Tag = $certFiles
+            $ib.Add_Click({ Install-ChainCerts -Files ([string[]]$this.Tag) })
+            $hd.Controls.Add($ib)
+        }
+    }
 
     $dt = New-Object System.Windows.Forms.RichTextBox
     $dt.Name = 'cardDetail'
@@ -5683,28 +6300,34 @@ function Show-SystemInfo {
     $body = New-Object System.Windows.Forms.Label
     $body.Location = '16,40'; $body.AutoSize = $true; $body.MaximumSize = '628,0'
     $body.Text = @"
-The Patch My PC Publishing Service runs as NT AUTHORITY\SYSTEM, and it downloads content using the same .NET and WinINET plumbing as Internet Explorer. Proxy settings, TLS configuration and web-filter policy can all differ between your account and SYSTEM, so a URL that works for you can still fail for the service.
+The Patch My PC Publishing Service runs as NT AUTHORITY\SYSTEM and downloads content with .NET and WinINET, the same components Internet Explorer used. Your account and SYSTEM can have different proxy settings, TLS configuration and web filtering, so a URL that works for you can fail for the service.
 
-Testing as SYSTEM reproduces what the service actually sees. Historically that meant PsExec plus Internet Explorer, which is no longer available on current servers.
+Running the tests as SYSTEM shows what the service sees. This used to be done with PsExec and Internet Explorer, which current servers no longer include.
 "@
 
     $lblH2 = New-SectionLabel -Text 'How this tool does it' -Location '16,196'
     $body2 = New-Object System.Windows.Forms.Label
     $body2.Location = '16,222'; $body2.AutoSize = $true; $body2.MaximumSize = '628,0'
     $body2.Text = @"
-Windows only hands a real SYSTEM token to a service or a scheduled task, so this tool registers a task, runs one batch of tests through it, reads the results back and removes it. No PsExec, and nothing is installed.
+Windows only runs code as SYSTEM from a service or a scheduled task. This tool registers a scheduled task, runs the tests through it, reads the results and deletes the task. PsExec is not used and nothing is installed.
 
     Task     \$($script:TaskName)
     Runs     NT AUTHORITY\SYSTEM, highest privileges, only when you press a test button
+    Script   a hash-checked copy in a folder only SYSTEM and Administrators can change
     Trigger  disabled, so Windows never starts it on its own
-    Expiry   self-deletes 60 minutes after it is created
+    Expiry   deleted by Windows 60 minutes after it is created
 
-The task is removed when this tool closes, swept up on the next launch if the tool was killed, and deleted by Windows at expiry regardless. Deletion is guarded by a marker in the task description, so a task of the same name that this tool did not create is never touched.
+The task is deleted after each run and when the tool closes. If the tool is killed, the next launch removes it. The tool only deletes a task with its own marker in the description, so other tasks with the same name are left alone.
 
-Parameters are passed in a DPAPI-encrypted, ACL-restricted file that is overwritten and deleted afterwards, so a proxy password is never written to disk in clear. Running the task by hand produces nothing.
+Test settings are passed in an encrypted file that only SYSTEM and Administrators can read. The file is overwritten and deleted after the run, so a proxy password is never stored in plain text. Running the task manually does nothing.
 
-Registering a task as NT AUTHORITY\SYSTEM needs local administrator rights, which is why this option requires an elevated session.
+Creating a SYSTEM task needs local administrator rights, so this option needs an elevated session.
 "@
+
+    $lblImp = New-Object System.Windows.Forms.Label
+    $lblImp.AutoSize = $true; $lblImp.MaximumSize = '628,0'; $lblImp.Location = '16,0'
+    $lblImp.Font = New-Object System.Drawing.Font($script:UiFont, [System.Drawing.FontStyle]::Bold)
+    $lblImp.Text = 'Important: save the script to a folder only administrators can change, such as C:\Program Files.'
 
     $btnOk = New-ActionButton 'Close' 88 26
     $btnOk.Add_Click({ $script:SysInfoDlg.Close() })
@@ -5727,15 +6350,18 @@ Registering a task as NT AUTHORITY\SYSTEM needs local administrator rights, whic
             $script:SysInfoDlg.Close()
         })
 
-    $dlg.Controls.AddRange(@($lblH, $body, $lblH2, $body2, $btnOpenTs, $btnOk))
+    $dlg.Controls.AddRange(@($lblH, $body, $lblH2, $body2, $lblImp, $btnOpenTs, $btnOk))
     $lblH2.Top = $body.Bottom + 20
     $body2.Top = $lblH2.Bottom + 8
-    $dlg.ClientSize = New-Object System.Drawing.Size(660, ($body2.Bottom + 66))
-    $btnOk.Location = New-Object System.Drawing.Point((660 - $btnOk.Width - 16), ($body2.Bottom + 20))
+    $lblImp.Top = $body2.Bottom + 4
+    $dlg.ClientSize = New-Object System.Drawing.Size(660, ($lblImp.Bottom + 66))
+    $btnOk.Location = New-Object System.Drawing.Point((660 - $btnOk.Width - 16), ($lblImp.Bottom + 20))
     $btnOk.Anchor = 'Bottom,Right'
-    $btnOpenTs.Location = New-Object System.Drawing.Point(16, ($body2.Bottom + 20))
+    $btnOpenTs.Location = New-Object System.Drawing.Point(16, ($lblImp.Bottom + 20))
     $btnOpenTs.Anchor = 'Bottom,Left'
     Set-ControlTheme $dlg
+    # After theming, which would otherwise repaint it as ordinary bold text.
+    $lblImp.ForeColor = $script:Pal.Warning
     $dlg.Add_FormClosed({ $script:SysInfoDlg = $null })
     [void]$dlg.ShowDialog($form)
 }
@@ -6393,16 +7019,16 @@ function Invoke-Ctx {
     if ($script:Acct -eq 'SYSTEM') { $script:SystemTaskUsed = $true }
     $pp = Get-ProxyParams
     Start-Task -Name ("{0} [{1}]" -f $Name, $script:Acct) -Target $Target -Kind $Kind -Total @($Tests).Count -Work {
-        param($Acct, $Tests, $SelfPath, $ExePath, $Url, $Mode, $PHost, $PPort, $PUser, $PPass, $UseDefaultCreds, $MaxFetchChars)
+        param($Acct, $Tests, $SelfPath, $SelfSha256, $ExePath, $Url, $Mode, $PHost, $PPort, $PUser, $PPass, $UseDefaultCreds, $MaxFetchChars)
         if ($Acct -eq 'SYSTEM') {
-            Invoke-SystemContextTests -SelfPath $SelfPath -ExePath $ExePath -Tests $Tests -Url $Url -Mode $Mode -PHost $PHost -PPort $PPort -PUser $PUser -PPass $PPass -UseDefaultCreds $UseDefaultCreds
+            Invoke-SystemContextTests -SelfPath $SelfPath -ExpectedSha256 $SelfSha256 -ExePath $ExePath -Tests $Tests -Url $Url -Mode $Mode -PHost $PHost -PPort $PPort -PUser $PUser -PPass $PPass -UseDefaultCreds $UseDefaultCreds
         }
         else {
             $proxy = Get-EffectiveProxy -Mode $Mode -PHost $PHost -PPort $PPort -PUser $PUser -PPass $PPass -UseDefaultCreds $UseDefaultCreds
             Invoke-RequestedTests -Tests $Tests -Url $Url -ProxyObj $proxy -ProxyMode $Mode -MaxFetchChars $MaxFetchChars
         }
     } -Params @{
-        Acct = $script:Acct; Tests = $Tests; SelfPath = $script:SelfPath; ExePath = (Get-Process -Id $PID).Path
+        Acct = $script:Acct; Tests = $Tests; SelfPath = $script:SelfPath; SelfSha256 = $script:SelfSha256; ExePath = (Get-Process -Id $PID).Path
         Url = $cboTarget.Text; Mode = $pp.Mode; PHost = $pp.PHost; PPort = $pp.PPort; PUser = $pp.PUser; PPass = $pp.PPass
         UseDefaultCreds = $pp.UseDefaultCreds; MaxFetchChars = $script:MaxFetchChars
     }
@@ -6876,12 +7502,11 @@ foreach ($job in @($script:Jobs)) { try { [void]$job.PS.BeginStop($null, $null) 
 try { $script:Jobs.Clear(); $script:Retired.Clear() } catch {}
 # Leave no artefacts behind: task, TaskCache entries and any legacy folder.
 try { if ($script:SystemTaskUsed) { Remove-AllTaskArtifacts | Out-Null } } catch {}
-
 # SIG # Begin signature block
 # MIIovgYJKoZIhvcNAQcCoIIorzCCKKsCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAJyJwRQaLRa6jO
-# SUiRpSppxwRgx0/vLwhPOQg9dnjexqCCIbswggWNMIIEdaADAgECAhAOmxiO+dAt
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBLghoyWjcR8r0z
+# bjcLmrFk9FIy8q00YJapuOdi5llE+aCCIbswggWNMIIEdaADAgECAhAOmxiO+dAt
 # 5+/bUOIIQBhaMA0GCSqGSIb3DQEBDAUAMGUxCzAJBgNVBAYTAlVTMRUwEwYDVQQK
 # EwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xJDAiBgNV
 # BAMTG0RpZ2lDZXJ0IEFzc3VyZWQgSUQgUm9vdCBDQTAeFw0yMjA4MDEwMDAwMDBa
@@ -6983,25 +7608,25 @@ try { if ($script:SystemTaskUsed) { Remove-AllTaskArtifacts | Out-Null } } catch
 # gpIUsWTjd6xpR6oaQf/DJbg3s6KCLPAlZ66RzIg9sC+NJpud/v4+7RWsWCiKi9EO
 # LLHfMR2ZyJ/+xhCx9yHbxtl5TPau1j/1MIDpMPx0LckTetiSuEtQvLsNz3Qbp7wG
 # WqbIiOWCnb5WqxL3/BAPvIXKUjPSxyZsq8WhbaM2tszWkPZPubdcMIIG7TCCBNWg
-# AwIBAgIQCoDvGEuN8QWC0cR2p5V0aDANBgkqhkiG9w0BAQsFADBpMQswCQYDVQQG
+# AwIBAgIQCE/cM09+RU7bww+P+ZIYNTANBgkqhkiG9w0BAQsFADBpMQswCQYDVQQG
 # EwJVUzEXMBUGA1UEChMORGlnaUNlcnQsIEluYy4xQTA/BgNVBAMTOERpZ2lDZXJ0
 # IFRydXN0ZWQgRzQgVGltZVN0YW1waW5nIFJTQTQwOTYgU0hBMjU2IDIwMjUgQ0Ex
-# MB4XDTI1MDYwNDAwMDAwMFoXDTM2MDkwMzIzNTk1OVowYzELMAkGA1UEBhMCVVMx
+# MB4XDTI2MDgwNTAwMDAwMFoXDTM3MTEwNDIzNTk1OVowYzELMAkGA1UEBhMCVVMx
 # FzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMuMTswOQYDVQQDEzJEaWdpQ2VydCBTSEEy
-# NTYgUlNBNDA5NiBUaW1lc3RhbXAgUmVzcG9uZGVyIDIwMjUgMTCCAiIwDQYJKoZI
-# hvcNAQEBBQADggIPADCCAgoCggIBANBGrC0Sxp7Q6q5gVrMrV7pvUf+GcAoB38o3
-# zBlCMGMyqJnfFNZx+wvA69HFTBdwbHwBSOeLpvPnZ8ZN+vo8dE2/pPvOx/Vj8Tch
-# TySA2R4QKpVD7dvNZh6wW2R6kSu9RJt/4QhguSssp3qome7MrxVyfQO9sMx6ZAWj
-# FDYOzDi8SOhPUWlLnh00Cll8pjrUcCV3K3E0zz09ldQ//nBZZREr4h/GI6Dxb2Uo
-# yrN0ijtUDVHRXdmncOOMA3CoB/iUSROUINDT98oksouTMYFOnHoRh6+86Ltc5zjP
-# KHW5KqCvpSduSwhwUmotuQhcg9tw2YD3w6ySSSu+3qU8DD+nigNJFmt6LAHvH3KS
-# uNLoZLc1Hf2JNMVL4Q1OpbybpMe46YceNA0LfNsnqcnpJeItK/DhKbPxTTuGoX7w
-# JNdoRORVbPR1VVnDuSeHVZlc4seAO+6d2sC26/PQPdP51ho1zBp+xUIZkpSFA8vW
-# doUoHLWnqWU3dCCyFG1roSrgHjSHlq8xymLnjCbSLZ49kPmk8iyyizNDIXj//cOg
-# rY7rlRyTlaCCfw7aSUROwnu7zER6EaJ+AliL7ojTdS5PWPsWeupWs7NpChUk555K
-# 096V1hE0yZIXe+giAwW00aHzrDchIc2bQhpp0IoKRR7YufAkprxMiXAJQ1XCmnCf
-# gPf8+3mnAgMBAAGjggGVMIIBkTAMBgNVHRMBAf8EAjAAMB0GA1UdDgQWBBTkO/zy
-# Me39/dfzkXFjGVBDz2GM6DAfBgNVHSMEGDAWgBTvb1NK6eQGfHrK4pBW9i/USezL
+# NTYgUlNBNDA5NiBUaW1lc3RhbXAgUmVzcG9uZGVyIDIwMjYgMTCCAiIwDQYJKoZI
+# hvcNAQEBBQADggIPADCCAgoCggIBALZ7pvLJ/s1K+NSbTGWz/TjGMPh8CQ6RucZC
+# Lv5anHzWJjF/NWJrFIhy24fcpKXlgRiky4WAawDfU3YP0BMxt9l3Dm5oCG5Z69Aq
+# EN1kgHg2epx+l+lZBcmJCcN0ASURML5uFIS80sZsDwO3BSkUxDjLJhBI+qiZP3ai
+# xAC/qEGLjsBNlLol9VZ7pfGEXiMlneJIC5/YKuizVzNFKZZEeoy/0B8Zm+nzKBgS
+# WG52lCO1w+nCg6XpCtklTJXeIg283hw7TmmsZXR+SMbjbrEOvZ3fP2VxIgeR28Y9
+# 0ZStd3F9VuA5RVynb/whITPAo9b75Zr4Ta6Mj3URm26QZYMn/FnbuTegcoRcFEZ9
+# FOqM5T6MTdtr/n74lIT/ug0eeOzmZ6QTFg33otX+bFRsIolvykE1jive4PuESaT8
+# zzVeFWDAMDtozNgLctkGD1ZjkEyZtJrLl5ya0m5doH/ScpaZCZVl6pNUOCybMc/k
+# xC6EAmSJY24L0yYKD1Nkddsnb/ItVKi/2nXpQNMu1PT5prW83vV8d67WowuUs0Hd
+# Y4H8AMLGvdL/WHEj3ZnqMqAQQP9u3Ai9t+5eQ02GDwy0ODjdzi0xlp70W+ow63/0
+# ++YDEX1M0iwgUHwbrJvfpklkZQvw3+kv3vUPItdwroczk9icflf55W1zOEKAcJVA
+# IXpcMCU9AgMBAAGjggGVMIIBkTAMBgNVHRMBAf8EAjAAMB0GA1UdDgQWBBQUyWOK
+# MC7USvtulPPm40B+9ezN4jAfBgNVHSMEGDAWgBTvb1NK6eQGfHrK4pBW9i/USezL
 # TjAOBgNVHQ8BAf8EBAMCB4AwFgYDVR0lAQH/BAwwCgYIKwYBBQUHAwgwgZUGCCsG
 # AQUFBwEBBIGIMIGFMCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5kaWdpY2VydC5j
 # b20wXQYIKwYBBQUHMAKGUWh0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0LmNvbS9EaWdp
@@ -7009,17 +7634,17 @@ try { if ($script:SystemTaskUsed) { Remove-AllTaskArtifacts | Out-Null } } catch
 # dDBfBgNVHR8EWDBWMFSgUqBQhk5odHRwOi8vY3JsMy5kaWdpY2VydC5jb20vRGln
 # aUNlcnRUcnVzdGVkRzRUaW1lU3RhbXBpbmdSU0E0MDk2U0hBMjU2MjAyNUNBMS5j
 # cmwwIAYDVR0gBBkwFzAIBgZngQwBBAIwCwYJYIZIAYb9bAcBMA0GCSqGSIb3DQEB
-# CwUAA4ICAQBlKq3xHCcEua5gQezRCESeY0ByIfjk9iJP2zWLpQq1b4URGnwWBdEZ
-# D9gBq9fNaNmFj6Eh8/YmRDfxT7C0k8FUFqNh+tshgb4O6Lgjg8K8elC4+oWCqnU/
-# ML9lFfim8/9yJmZSe2F8AQ/UdKFOtj7YMTmqPO9mzskgiC3QYIUP2S3HQvHG1FDu
-# +WUqW4daIqToXFE/JQ/EABgfZXLWU0ziTN6R3ygQBHMUBaB5bdrPbF6MRYs03h4o
-# bEMnxYOX8VBRKe1uNnzQVTeLni2nHkX/QqvXnNb+YkDFkxUGtMTaiLR9wjxUxu2h
-# ECZpqyU1d0IbX6Wq8/gVutDojBIFeRlqAcuEVT0cKsb+zJNEsuEB7O7/cuvTQasn
-# M9AWcIQfVjnzrvwiCZ85EE8LUkqRhoS3Y50OHgaY7T/lwd6UArb+BOVAkg2oOvol
-# /DJgddJ35XTxfUlQ+8Hggt8l2Yv7roancJIFcbojBcxlRcGG0LIhp6GvReQGgMgY
-# xQbV1S3CrWqZzBt1R9xJgKf47CdxVRd/ndUlQ05oxYy2zRWVFjF7mcr4C34Mj3oc
-# CVccAvlKV9jEnstrniLvUxxVZE/rptb7IRE2lskKPIJgbaP5t2nGj/ULLi49xTcB
-# ZU8atufk+EMF/cWuiC7POGT75qaL6vdCvHlshtjdNXOCIUjsarfNZzCCB8kwggWx
+# CwUAA4ICAQCNxTphHp1SCt+ZrAmAfn0oQLFr0mLywSLaDXQIENoyKqxrFbJblzCV
+# P/pkXmwXOdrOpWygLzlT12os5ipDCy35RBCg2UMeApEtrfGhz45F4Wt4WGdNdIbR
+# Wt3YTYJmpR+b7lr4d7Uwn+H600u4D7RnOGf8Wj4UNgAdZkfHhHv1mx9EVh71SJel
+# cEN/oORSjXzdjfw1iZH9d8Nh/thn6hH23d+VsPAr6GAYyzSA02nXD1nYLI7Ijmiv
+# +xLCiYC41DSFYL3GhTiy0PxpawPtGRyaBVGzq+UiTfM8pD7KVyF5aQyWP4KhVGUU
+# Tnmm/RlYJoW3TiXA/+t0YcT2oRVBm3JETjajHug2AL+v5jhtKVnd3D0rbHXEu27o
+# +Q8p4sEWPMqKDB+qbceb6T/6WcwTwXmQ9lOCLLYcsQeSWmvKqzpAec9etE14jOQA
+# zLKWdE3w/TCaKtLRaRT7LCkRYVnhA2D73FLje1O5b3HR5eHs0NzU/+xX7NbEdcof
+# y0W3Wdwd1XOqtlpg/JgwtKfZM5dqO94lbUveOiJBI+xZEbGRsMNbXmMREUTgu+Oc
+# a7Y73MPWcslIx2VhkSKSXjDbD6rgg39H5Mh7QfieAIjWagkJNt68Yfim6cjEzVSi
+# LSeZfdkr5dtFPTW6jATlWJdYeeDRGCyatf8R1hSjzSvdN8yWQPT9gzCCB8kwggWx
 # oAMCAQICEAlBhSwxLm93rMd0RNayLkYwDQYJKoZIhvcNAQELBQAwaTELMAkGA1UE
 # BhMCVVMxFzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMuMUEwPwYDVQQDEzhEaWdpQ2Vy
 # dCBUcnVzdGVkIEc0IENvZGUgU2lnbmluZyBSU0E0MDk2IFNIQTM4NCAyMDIxIENB
@@ -7066,34 +7691,34 @@ try { if ($script:SystemTaskUsed) { Remove-AllTaskArtifacts | Out-Null } } catch
 # dXN0ZWQgRzQgQ29kZSBTaWduaW5nIFJTQTQwOTYgU0hBMzg0IDIwMjEgQ0ExAhAJ
 # QYUsMS5vd6zHdETWsi5GMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwx
 # CjAIoAKAAKECgAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGC
-# NwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIIutzVvasadPaAmb
-# 37178IvhzVq/yqlKr75KnQQYQtLxMA0GCSqGSIb3DQEBAQUABIICAGjG4AqQRkO3
-# wqogOD9mlKmjDbzesY+LImA9nUfMSbMn6g7UsHKMBxOVWV2UVa2H5RvfLwirCu8G
-# FKjkYC71TgtkxQBv6AV93s1tRqEy3mbMDbSk0tuNuzrIMCVfzP6YvWL1Wwm7kvrq
-# J60psN7o51+R74haYLyDAmkmCuzQ0ZVx+kpP/Njl89v+ivFcKPNMmlnqcGaiZM6F
-# GVLKgTzFMzMlLbKfUcna2QlvoawJs8kCTvumgx2GuCzEvUWMWJXh/deaMP1NmFAL
-# P0znUDNrhsBbVkAnVCA0x9x9v+X+w3dK5QNTw/STMQTqK/vDbpAi7PXe0vjyXPy0
-# 8j8mL0T0Tsu4cW6uX28u1lZlgK1jyH3BRJmzlRbRnVo/k5P3/7mwGdqHyD8CP1mD
-# 13gvXos8RWf6VBNaqwcI1nv4ZQAhJxFqOkLDFbh0ckUKFbOgI3ZZm1jYHaB6jD4Z
-# gmJe2JHk3kguvYDOUZDJ3/dHOKat5zrrR3YDW5l08OfYORITmLcgyihJCqxpHkFy
-# i4w0MSo4dpMOghth8pv1jIS8GKO5fOeFyTi5gakk9nTbm8YZMZUF3jZdgD1I9dpE
-# 9PrHOUGqqleBa9uBqAv4N7Y/laAULXoee9u+iBbHPpkmMqzxgy50cle/+nc3Br6K
-# Ab3xx9bHLejqZY6Occ6zaflxpTVjgDqUoYIDJjCCAyIGCSqGSIb3DQEJBjGCAxMw
+# NwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEICSyKXI78Pg/HSMp
+# kCQGF9uU8gMmHJAY16Xk4tmIuBVNMA0GCSqGSIb3DQEBAQUABIICAC6lYQqwcxbU
+# INkpQppJ9QK5ooXw/df4TxxTAmZkdWE2D/255N6k60ZMYZBClrTqMFAgiHZDP24W
+# 7wBAvfS+EpLyMKF+Y88AqNqdevsnHFaH5yiZQsFnwdgw/cklIXh3JH90F2vBBmml
+# zgg+TZu+dBpDcg0j/slHnTyPfONilJ0Z+M2nNP38Y6gpkWSuOde1M7qKFj+wW1Lt
+# iih7+paGZez3netcr87227FzixhtFjwxVniXcrVqYZGLT+akdpFQyZfXgsvj8HqL
+# 97F5sp68A1/nlbnjh/tQebEdJ9zMLxnkWD/HWXznfe0pIatWXHBhHly5uNaw1j+E
+# uzVBlBBstHPyxJ+6QvmJMqVDKBrygxO5nCcJ1B9XmbYXbY67KOmG7mNjw0nrPFF/
+# tiZmza107UiwfSwl6MEU+Dj9OvYo5MLYqLeB3oVcW+adB/YmW4Jmd2HBc/9w2ffJ
+# UdR3qdP6XO4d0IJ0kMAayCz0ND4hB4QMIkB8OKY7wOzut6A8azo58/Ln1EWQZMP+
+# SjJJZNE3e5kIOiwMNR6FtO28ILyVqKZhCMszCT7yR8CanV9rufsjNGvfPPj5vdEC
+# eECTxFi1suS6igB867kMPLtBkWL1N6YKDY0Z06Mo98Mo2N16FCJYfVHfd2CPFXK+
+# 7dsBph8QnaOJqMFemK6e03IXnu/x0QkPoYIDJjCCAyIGCSqGSIb3DQEJBjGCAxMw
 # ggMPAgEBMH0waTELMAkGA1UEBhMCVVMxFzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMu
 # MUEwPwYDVQQDEzhEaWdpQ2VydCBUcnVzdGVkIEc0IFRpbWVTdGFtcGluZyBSU0E0
-# MDk2IFNIQTI1NiAyMDI1IENBMQIQCoDvGEuN8QWC0cR2p5V0aDANBglghkgBZQME
+# MDk2IFNIQTI1NiAyMDI1IENBMQIQCE/cM09+RU7bww+P+ZIYNTANBglghkgBZQME
 # AgEFAKBpMBgGCSqGSIb3DQEJAzELBgkqhkiG9w0BBwEwHAYJKoZIhvcNAQkFMQ8X
-# DTI2MDgxMzE1MjE1NVowLwYJKoZIhvcNAQkEMSIEIF4+8oRBQUNY9MlvLr7/Ybj9
-# f+lHp5LCmm8tdzZMPgPgMA0GCSqGSIb3DQEBAQUABIICAFiicM/hx3HbdDeZQuXd
-# 25ip/T0KgBOKUslRF+TBxxdIGAtlkMWfsojKTkG9ikjteGoQGvt7Ar2/phB/AX/q
-# Oma+PSrS1RaKorGlPvwDe8/V5NufY5ELb8pgTGuI6WFQlQQ6q5M5XJPum9vE0AmA
-# /6EHaQ+2504p1ks0oISCHoHoQJBJXQ3MbXGr2G6JW/VG7ROXCH6dUVHr1wfOEQ+9
-# ZfFhyaTKLDitKXQhfAyZom68DJRJPjjHAdO+sgeD0ZrryN/A3h4hWbPpZyJtSMHb
-# 9pZOo/cxhIYbc8HO2mnNiDyllAmNJAMh9oglWngMFvoE7oKGScfkpL3ptv1uGIQi
-# 1wSeGc6F8A9qzyA8TQrQVruZp8FbYlbdaplO/h2tQM5/NjJY/FHqem7UlrNeqK12
-# Q69tkCo7g5w2vpg4lbuXpUt5Hly1OG7jPqcdfN6xoejnUlT+yMxYWfi3sWFIt9jL
-# UjsDLqbhByAs/cl4fghZ1QivnM9YYupyAuWPRX5XlxQM/BQzrdERTXkmw+r9aTmt
-# frchXxXSaC8OSGESkWlB3kBvgPgKygaxXOoZNjre7BQ/rfBQ08e7wLzAVpyG1ykn
-# 4iPJj2U2h1Q0eEbN4FzKqIxrG42ie8hsrZdRqMO52pkl2acX9JgW0cFkD5b1rJDU
-# fdeuSxHanYnBkg29u8C8VVLe
+# DTI2MTExMDE3NTY0MlowLwYJKoZIhvcNAQkEMSIEIL/vod2dQ9oPHtIPMHC7N9kq
+# jj6zH4oZwhE41Zo3ILRZMA0GCSqGSIb3DQEBAQUABIICAJ6CaIMNCEJSM+RRi1QV
+# 11w/K+dZp5GHTtSDV9aVLUy3PGhkjXGRrIsxQW8hDJBBYDcpIiqPPkSlWqDn2s8o
+# Ibyy1sobFLK3ZsgOXNFizn//vsNuwKzZ9Y30WE9i6UsBaYOkr+EOCyWh5pcwXhXB
+# ZrUu9RxHNGQ1bw/zHTgKTT+7WLP/SKXA+WTmC6KwADe3Ifre5JWgByPCG74wPWaX
+# udX219r1r2NgVPaxOzVuN/rtiMvMtWbIwmQ4nMyPB9ES4I0kP1hSRRX07ZIRH44/
+# teJ6BlkQhQHRO3Japdl2LNVl1xFt5+cufZZcqxJpnmkK4vWxcVxfAe7C50OoUTVH
+# QLfwk45LRvqdV+UAbpCs6tlZLdSRDSiEfMRqHa+HKc2qMdR8bLloxZ5fT9sYgXNS
+# 0MClj0RGCim77fcWmp+MbSOJH3soz9YRnp89kbEeo/yrbL3sOZXsEpFXhcP6+jlJ
+# mGhAC0QZrjLVb68Fs1rV9ogPZVZwOJ8ise8w8mARmOzxJxlYt898EDy/P2esYa+z
+# XsZnvYoOyCN7Ojx9aCepXvK0BFW56SAt9pIRbXDh0RYAFhAdETC+PnoYn8YeEelM
+# ANV0MgHquU+37kx5l07ZRFYJz+KcoUt4GeddDqk2SzoYzZVirCZz+wHudLzSxtG2
+# HVsS+MYPNny813MUG/nSf3ie
 # SIG # End signature block
